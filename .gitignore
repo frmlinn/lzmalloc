@@ -1,0 +1,36 @@
+# =========================================================================
+# lzmalloc - .gitignore
+# =========================================================================
+
+# 1. Directories and compilers
+build/
+CMakeCache.txt
+CMakeFiles/
+CMakeScripts/
+compile_commands.json
+
+# 2. Binaries
+*.o
+*.d
+*.so
+*.so.*
+*.a
+*.dylib
+
+# 3. Debugger and Crash Dumps
+*.dSYM/
+core
+core.*
+vgcore.*
+*.log
+
+# 4. VScode
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 5. OS temp files
+.DS_Store
+Thumbs.db

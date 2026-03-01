@@ -1,0 +1,19 @@
+services:
+  # Service 1: Automated Smoke Test (Sanity Check)
+  smoke-test:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    # Ensures we see the console output and the container exits cleanly
+    deploy:
+      restart_policy:
+        condition: none
+
+  # Service 2: Interactive environment for manual debugging
+  interactive:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    stdin_open: true # Equivalent to -i
+    tty: true        # Equivalent to -t
+    entrypoint: ["/bin/bash"] # Overrides the automated test to leave a shell open
