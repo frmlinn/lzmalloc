@@ -20,7 +20,7 @@ jobs:
       - name: Install dependencies (Clang/CMake)
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang cmake lld llvm
+          sudo apt-get install -y clang cmake lld llvm binutils
 
       - name: Run Core Test Suite
         run: make test CC=clang

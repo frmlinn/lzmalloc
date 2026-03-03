@@ -1,6 +1,18 @@
 cmake_minimum_required(VERSION 3.10)
 project(lzmalloc VERSION 1.0.0 LANGUAGES C)
 
+# ==============================================================================
+# 1. Global Optimization Settings (LTO / IPO)
+# ==============================================================================
+include(CheckIPOSupported)
+check_ipo_supported(RESULT ipo_supported)
+if(ipo_supported)
+    message(STATUS "Link-Time Optimization (LTO/IPO) is SUPPORTED and ENABLED for Release.")
+    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+else()
+    message(WARNING "Link-Time Optimization (LTO/IPO) is NOT supported by this toolchain.")
+endif()
+
 if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "Build options: Debug Release" FORCE)
 endif()

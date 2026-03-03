@@ -13,6 +13,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     make \
     libc6-dev \
     git \
+    binutils \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /lzmalloc_src

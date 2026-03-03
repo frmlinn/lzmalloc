@@ -1,0 +1,12 @@
+# docker-compose.redis.yml
+services:
+  redis-lzmalloc:
+    build:
+      context: .
+      dockerfile: Dockerfile.redis
+    container_name: redis-lzmalloc
+    volumes:
+      # Montamos nuestro motor hiper-optimizado en el contenedor
+      - ./build/release/liblzmalloc.so:/usr/local/lib/liblzmalloc.so
+    ports:
+      - "6379:6379"
