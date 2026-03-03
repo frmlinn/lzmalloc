@@ -1,6 +1,5 @@
 name: lzmalloc Fast CI
 
-# Trigger on every push or pull request to the main branches
 on:
   push:
     branches: [ "main", "master" ]
@@ -9,30 +8,22 @@ on:
 
 jobs:
   fast-build-test:
-    name: Ubuntu LTS (Bare-metal)
+    name: Ubuntu LTS (Bare-metal Validation)
     runs-on: ubuntu-latest
 
     steps:
-      - name: 📥 Checkout source code
+      - name: Checkout source code
         uses: actions/checkout@v4
+        with:
+          submodules: recursive 
 
-      - name: 🛠️ Install dependencies (Clang/CMake)
-        # ubuntu-latest already includes most of this, but we ensure the latest versions
+      - name: Install dependencies (Clang/CMake)
         run: |
           sudo apt-get update
           sudo apt-get install -y clang cmake
 
-      - name: ⚙️ Configure lzmalloc (CMake)
-        # Generate dynamic constants for x86_64 forcing the Clang compiler
-        run: cmake -B build/release -DCMAKE_C_COMPILER=clang -DCMAKE_BUILD_TYPE=Release
+      - name: Run Core Test Suite
+        run: make test CC=clang
 
-      - name: 🔨 Build library
-        # Compile using all available CPU cores on the GitHub runner
-        run: make -C build/release -j$(nproc)
-
-      - name: 🧪 POSIX Smoke Test (LD_PRELOAD)
-        # Inject the newly compiled allocator to run a quick file system traversal
-        run: |
-          echo "=== Executing POSIX injection on Ubuntu ==="
-          LD_PRELOAD=$PWD/build/release/liblzmalloc.so ls -laR /usr/lib > /dev/null
-          echo "=== Injection successful without crashes ==="
+      - name: Build Production Release
+        run: make release CC=clang

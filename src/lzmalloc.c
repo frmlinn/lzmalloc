@@ -284,13 +284,46 @@ static inline int is_power_of_two(size_t x) {
 }
 
 void* lz_memalign(size_t alignment, size_t size) {
-    if (LZ_UNLIKELY(!is_power_of_two(alignment))) return NULL;
-    if (alignment <= 8) return lz_malloc(size);
+    if (LZ_UNLIKELY(alignment == 0 || (alignment & (alignment - 1)) != 0)) return NULL;
 
-    size_t promoted_size = (size > alignment) ? size : alignment;
-    promoted_size = LZ_ALIGN_UP(promoted_size, alignment);
+    /* FAST PATH: Small, natural alignments. 
+     * Our Slabs natively guarantee up to 64-byte alignment because Size Classes 
+     * are multiples of 16/32/64, and data_start is cache-line aligned. */
+    if (alignment <= 64 && size <= LZ_MAX_SLAB_OBJ_SIZE) {
+        size_t promoted_size = LZ_ALIGN_UP(size, alignment);
+        return lz_malloc(promoted_size);
+    }
+
+    /* VMM DIRECT PATH: Bypass Slabs for extreme alignment.
+     * Calculate a dynamic offset that accommodates both our 128 bytes 
+     * of mandatory metadata (Header + Size info) AND the requested alignment. */
+    size_t base_offset = 128; 
+    size_t dynamic_offset = LZ_ALIGN_UP(base_offset, alignment);
     
-    return lz_malloc(promoted_size);
+    size_t required_bytes = dynamic_offset + size;
+    size_t total_bytes = LZ_ALIGN_UP(required_bytes, LZ_HUGE_PAGE_SIZE);
+    
+    void* ptr = lz_sys_alloc_huge_aligned(total_bytes);
+    if (LZ_UNLIKELY(!ptr)) return NULL;
+    
+    lz_chunk_header_t* header = (lz_chunk_header_t*)ptr;
+    header->magic = LZ_CHUNK_MAGIC_V2;
+    header->owning_tlh = NULL; 
+    header->is_lsm_region = 0;
+    
+    /* Store internal size metadata securely in Cache Line 2 (offset 64) */
+    *((size_t*)((char*)ptr + LZ_CACHE_LINE_SIZE)) = total_bytes; 
+    *((size_t*)((char*)ptr + LZ_CACHE_LINE_SIZE + sizeof(size_t))) = size;
+    
+    void* user_ptr = (void*)((char*)ptr + dynamic_offset);
+    
+    /* Register EVERY 2MB window in the Radix Tree for exclusive resolution */
+    uintptr_t base_addr = (uintptr_t)ptr;
+    for (size_t offset = 0; offset < total_bytes; offset += LZ_HUGE_PAGE_SIZE) {
+        lz_rtree_set(base_addr + offset, header);
+    }
+    
+    return user_ptr;
 }
 
 int lz_posix_memalign(void **memptr, size_t alignment, size_t size) {

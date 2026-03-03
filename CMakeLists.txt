@@ -50,6 +50,8 @@ configure_file(
     @ONLY
 )
 
+add_subdirectory(external/lz-logger)
+
 # Collect all source files
 file(GLOB LIB_SRCS "src/*.c")
 
@@ -71,6 +73,23 @@ target_link_options(lzmalloc PRIVATE
 target_include_directories(lzmalloc PRIVATE 
     ${CMAKE_CURRENT_SOURCE_DIR}/include 
     ${CMAKE_CURRENT_BINARY_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/external/lz-logger/include
 )
 
-target_link_libraries(lzmalloc PRIVATE pthread)
+target_link_libraries(lzmalloc PRIVATE pthread lz_logger)
+
+# ==============================================================================
+# 5. Tests Suite
+# ==============================================================================
+enable_testing()
+
+include_directories(${CMAKE_CURRENT_SOURCE_DIR}/external/lz-logger/include)
+
+add_executable(unit_test tests/unit_tests.c)
+target_link_libraries(unit_test PRIVATE lz_logger)
+
+add_executable(integration_test tests/integration_tests.c)
+target_link_libraries(integration_test PRIVATE lz_logger)
+
+add_executable(stress_test tests/stress_tests.c)
+target_link_libraries(stress_test PRIVATE lz_logger pthread)

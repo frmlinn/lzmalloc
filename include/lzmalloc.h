@@ -59,8 +59,12 @@ void* lz_realloc(void* ptr, size_t new_size);
 void lzmalloc_gc(void);
 
 /**
- * @brief Allocates memory with a specific alignment (Obsolete but common standard).
- * @param alignment Desired alignment (must be a power of 2).
+ * @brief Allocates memory with a strict alignment boundary.
+ * @details Forwards small, naturally aligned requests to the Slab engine. 
+ * For large or strictly aligned requests (> 64 bytes), it bypasses the TLH
+ * and requests a Huge Page directly from the VMM, dynamically calculating
+ * the payload offset to satisfy the alignment while preserving the chunk header.
+ * * @param alignment Desired alignment (must be a power of 2).
  * @param size Size in bytes to allocate.
  * @return Pointer to the aligned memory, or NULL on error.
  */

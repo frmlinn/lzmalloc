@@ -28,6 +28,17 @@ debug:
 	@$(MAKE) --no-print-directory -C $(BUILD_DIR_DEBUG)
 	@echo "Done. Library generated at: $(BUILD_DIR_DEBUG)/liblzmalloc.so"
 
+test: debug
+	@echo "=== Configuring tests ==="
+	@echo ">>> 1. Unit Tests"
+	@LD_PRELOAD=./$(BUILD_DIR_DEBUG)/liblzmalloc.so ./$(BUILD_DIR_DEBUG)/unit_test
+	
+	@echo "\n>>> 2. Integration Tests"
+	@LD_PRELOAD=./$(BUILD_DIR_DEBUG)/liblzmalloc.so ./$(BUILD_DIR_DEBUG)/integration_test
+	
+	@echo "\n>>> 3. Stress Tests"
+	@LD_PRELOAD=./$(BUILD_DIR_DEBUG)/liblzmalloc.so ./$(BUILD_DIR_DEBUG)/stress_test
+
 clean:
 	@echo "=== Cleaning build environment ==="
 	@rm -rf build

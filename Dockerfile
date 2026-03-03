@@ -5,27 +5,32 @@ FROM ubuntu:24.04 AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Install ONLY strictly necessary packages without recommended bloat
 RUN apt-get update && apt-get install -y --no-install-recommends \
     clang \
     cmake \
     make \
     libc6-dev \
+    git \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /lzmalloc_src
 COPY . .
-RUN make release
+
+# Validamos el motor antes de empaquetar
+RUN make test CC=clang
+# Compilamos la versión final
+RUN make release CC=clang
 
 # =========================================================================
-# STAGE 2: Execution Environment (Clean and pristine)
+# STAGE 2: Artifact Export
 # =========================================================================
 FROM ubuntu:24.04
 
-# Copy the compiled library (Ubuntu base image already includes 'ls' and 'sh')
+# Exportamos solo el binario final
 COPY --from=builder /lzmalloc_src/build/release/liblzmalloc.so /usr/local/lib/liblzmalloc.so
 
 ENV LZMALLOC_SO="/usr/local/lib/liblzmalloc.so"
 
-# Quick Smoke Test using built-in system utilities
-CMD ["sh", "-c", "echo '\n=== Starting POSIX Smoke Test (Ubuntu Minimal) ===' && LD_PRELOAD=$LZMALLOC_SO ls -laR /usr > /dev/null && echo '=== Smoke Test Completed Successfully ===\n'"]
+# No hay CMD por defecto para actuar como imagen base de librería, 
+# o puedes dejar bash para debug.
+CMD ["/bin/bash"]

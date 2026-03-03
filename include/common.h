@@ -15,6 +15,7 @@
 #include <stdbool.h>   // bool, true, false
 #include <assert.h>    // assert() for Debug mode validations
 #include <stdatomic.h> // Native C11 atomics (memory_order_*)
+#include "lz_log.h"    // Logging helpers
 
 /* ========================================================================= *
  * Architecture Constants (Generated dynamically)
