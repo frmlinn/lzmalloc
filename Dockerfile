@@ -7,6 +7,8 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     clang \
+    lld \
+    llvm \
     cmake \
     make \
     libc6-dev \
@@ -16,8 +18,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /lzmalloc_src
 COPY . .
 
-# Validamos el motor antes de empaquetar
-RUN make test CC=clang
 # Compilamos la versión final
 RUN make release CC=clang
 

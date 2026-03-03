@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <unistd.h>
+#include <stdatomic.h>
 #include "lz_log.h"
 
 #define NUM_PRODUCERS 40
@@ -46,8 +47,8 @@ void* producer_worker(void* arg) {
         ((volatile char*)ptr)[0] = 'X';
 
         /* Lock-free push: Claim index, then publish pointer with RELEASE semantics */
-        int idx = __atomic_fetch_add(&write_idx, 1, __ATOMIC_RELAXED);
-        __atomic_store_n(&shared_pointers[idx], ptr, __ATOMIC_RELEASE);
+        int idx = atomic_fetch_add_explicit(&write_idx, 1, memory_order_relaxed);
+        atomic_store_explicit(&shared_pointers[idx], ptr, memory_order_release);
     }
     return NULL;
 }
@@ -63,15 +64,13 @@ void* consumer_worker(void* arg) {
     int target_consumption = TOTAL_POINTERS / NUM_CONSUMERS;
 
     while (consumed < target_consumption) {
-        /* Attempt to claim the next pointer index atomically */
-        int claim_idx = __atomic_fetch_add(&read_idx, 1, __ATOMIC_RELAXED);
+        /* Uso correcto del estándar C11 */
+        int claim_idx = atomic_fetch_add_explicit(&read_idx, 1, memory_order_relaxed);
         
         if (claim_idx < TOTAL_POINTERS) {
             void* ptr_to_free = NULL;
             
-            /* Active Spin-Wait with low latency (ACQUIRE semantics). 
-             * Wait until the producer actually writes the pointer to the array. */
-            while ((ptr_to_free = __atomic_load_n(&shared_pointers[claim_idx], __ATOMIC_ACQUIRE)) == NULL) {
+            while ((ptr_to_free = atomic_load_explicit(&shared_pointers[claim_idx], memory_order_acquire)) == NULL) {
                 #if defined(__x86_64__) || defined(__i386__)
                     __asm__ volatile("pause" ::: "memory");
                 #elif defined(__aarch64__) || defined(__arm__)
@@ -81,7 +80,7 @@ void* consumer_worker(void* arg) {
                 #endif
             }
             
-            free(ptr_to_free); /* Cross-thread remote free happens HERE */
+            free(ptr_to_free); 
             consumed++;
         }
     }

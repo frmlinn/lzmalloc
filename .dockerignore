@@ -1,0 +1,16 @@
+# .dockerignore
+# Ignorar directorios de compilación local
+build/
+cmake-build-*/
+out/
+
+# Ignorar archivos de control de versiones
+.git/
+.github/
+
+# Ignorar archivos temporales del editor/IDE
+.vscode/
+.idea/
+*.swp
+*.o
+*.so
