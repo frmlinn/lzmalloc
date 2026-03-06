@@ -1,6 +1,6 @@
 /**
  * @file topology.c
- * @brief Implementation of NUMA detection using native syscalls.
+ * @brief Implementation of NUMA detection using native syscalls via vDSO.
  */
 
 #define _GNU_SOURCE // Required for Linux syscalls
@@ -22,22 +22,12 @@ static uint32_t g_numa_node_count = 1;
 static lz_numa_pool_t g_numa_pools[LZ_MAX_NUMA_NODES] LZ_CACHE_ALIGNED = {0};
 
 /* ========================================================================= *
- * Thread-Local State (TLS)
- * ========================================================================= */
-
-// Local cache to avoid calling getcpu on every allocation.
-// Initialized to an invalid value (-1) to force a read on the first attempt.
-static __thread int32_t tls_current_node = -1;
-
-/* ========================================================================= *
  * Implementation
  * ========================================================================= */
 
 void lz_topology_init(void) {
     // For simplicity and independence, we assume all systems have at least 1 NUMA node.
     // Exhaustive detection would require parsing /sys/devices/system/node/
-    // We initialize safely to 1.
-    
     g_numa_node_count = 1;
 
     for (uint32_t i = 0; i < LZ_MAX_NUMA_NODES; ++i) {
@@ -51,27 +41,22 @@ uint32_t lz_topology_get_node_count(void) {
 }
 
 uint32_t lz_get_current_node(void) {
-    // Fast-path: If we already know the node, return it directly.
-    if (LZ_LIKELY(tls_current_node >= 0)) {
-        return (uint32_t)tls_current_node;
-    }
-
-    // Slow-path: First time this thread requests its node.
 #ifdef __linux__
     unsigned cpu, node;
     
-    // SYS_getcpu is supported on Linux and uses vDSO, making it extremely fast.
-    if (syscall(SYS_getcpu, &cpu, &node, NULL) == 0) {
+    // SYS_getcpu is supported on Linux and uses vDSO (Virtual dynamically linked shared object).
+    // This makes it essentially a user-space memory read (~1-2ns).
+    // By calling it dynamically every time, we are immune to the "NUMA Migration Trap"
+    // where the OS scheduler aggressively moves a thread to a different physical CPU socket.
+    if (LZ_LIKELY(syscall(SYS_getcpu, &cpu, &node, NULL) == 0)) {
         // Security validation to prevent overflowing our pool array
-        if (node < LZ_MAX_NUMA_NODES) {
-            tls_current_node = node;
+        if (LZ_LIKELY(node < LZ_MAX_NUMA_NODES)) {
             return node;
         }
     }
 #endif
 
-    // Fallback: If OS unsupported (macOS) or non-NUMA architecture, assign all to Node 0.
-    tls_current_node = 0;
+    // Fallback: If OS unsupported (macOS/FreeBSD) or non-NUMA architecture, assign all to Node 0.
     return 0;
 }
 
