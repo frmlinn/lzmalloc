@@ -1,7 +1,7 @@
 /**
  * @file vmm.h
  * @brief Virtual Memory Manager (VMM) for lzmalloc V2.
- * Responsible for allocating and recycling 2MB Superblocks (Chunks).
+ * Responsible for allocating, caching, and recycling 2MB Superblocks (Chunks).
  */
 
 #ifndef LZ_VMM_H
@@ -16,24 +16,26 @@
  * ========================================================================= */
 
 /**
- * @brief Initializes the VMM and its dependencies (Topology).
- * Must be called once during allocator bootstrap.
+ * @brief Bootstraps the VMM and its underlying hardware topology dependencies.
+ * @note Must be called exactly once during the global allocator initialization.
  */
 void lz_vmm_init(void);
 
 /**
- * @brief Allocates a 2MB Chunk strictly aligned to a 2MB boundary.
- * Prioritizes the fast-cache of the current NUMA node. If empty, falls back to the OS.
- * @return Pointer to the aligned Chunk, or NULL if Out-Of-Memory (OOM).
+ * @brief Allocates a 2MB/32MB Chunk strictly aligned to the huge page boundary.
+ * Prioritizes the lock-free fast-cache of the current NUMA node. 
+ * If the local cache is exhausted, it falls back to the Global Pool/OS.
+ * * @return Pointer to the cleanly aligned Chunk header, or NULL on OS OOM.
  */
 lz_chunk_header_t* lz_vmm_alloc_chunk(void);
 
 /**
- * @brief Frees a 2MB Chunk.
- * Returns it to its original NUMA node cache. If the cache exceeds 
- * LZ_VMM_MAX_CACHED_CHUNKS, it aggressively unmaps the memory back to the OS.
- * @param chunk Pointer to the Chunk header.
+ * @brief Releases a Chunk back to the memory management subsystem.
+ * Attempts to return it to the NUMA local cache for thermal hysteresis. 
+ * If the cache exceeds LZ_VMM_MAX_CACHED_CHUNKS, it delegates to the Global Pool
+ * and triggers active RSS deflation.
+ * * @param chunk Pointer to the Chunk header to be freed.
  */
 void lz_vmm_free_chunk(lz_chunk_header_t* chunk);
 
-#endif // LZ_VMM_H
+#endif /* LZ_VMM_H */

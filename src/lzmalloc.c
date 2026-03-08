@@ -1,6 +1,6 @@
 /**
  * @file lzmalloc.c
- * @brief Implementation of the public API and Thread-Local Heap lifecycle management.
+ * @brief Implementation of the POSIX API routing layer and Thread-Local state.
  */
 
 #define _GNU_SOURCE
@@ -12,12 +12,13 @@
 #include "security.h"
 #include "rtree.h"
 #include "slab.h"
+#include "span.h" 
 #include <string.h>
 #include <stdlib.h>
 #include <pthread.h>
 #include <sys/mman.h>
 #include <errno.h> 
-#include <unistd.h> 
+#include <unistd.h>
 
 /* ========================================================================= *
  * Global and Local State (TLS)
@@ -33,8 +34,8 @@ static pthread_key_t g_tlh_key;
  * ========================================================================= */
 
 /**
- * @brief Allocates dynamic memory forcing strict 2MB alignment.
- * Mitigates VMA Storms by mapping Super Chunks compatible with the Radix Tree.
+ * @brief Allocates massive objects directly from the VMM, bypassing the TLH.
+ * Aligns requests strictly to 2MB to integrate seamlessly with the Radix Tree.
  */
 static void* lz_sys_alloc_huge_aligned(size_t total_size) {
     size_t request_size = total_size + LZ_HUGE_PAGE_SIZE;
@@ -87,7 +88,7 @@ static lz_tlh_t* lz_resurrect_zombie(void) {
 void lzmalloc_gc(void) {
     lz_tlh_t* current = atomic_load_explicit(&g_zombie_tlhs, memory_order_acquire);
     while (current != NULL) {
-        lz_tlh_reap(current);
+        lz_tlh_reap(current); /* Sweeps remote frees into the correct engine */
         current = current->next_zombie;
     }
 }
@@ -164,21 +165,26 @@ static LZ_ALWAYS_INLINE void ensure_tls_init(void) {
 }
 
 /* ========================================================================= *
- * POSIX API Implementation
+ * POSIX API Implementation (The Master Router)
  * ========================================================================= */
 
 void* lz_malloc(size_t size) {
     if (LZ_UNLIKELY(size == 0)) size = 1;
 
-    if (LZ_UNLIKELY(size > LZ_MAX_SLAB_OBJ_SIZE)) {
-        // Layout: 
-        // 0-63: lz_chunk_header_t (Cache Line 1)
-        // 64-127: Internal size metadata (Cache Line 2)
-        // 128+: User pointer (Cache Line 3)
+    /* 1. FAST PATH: Slabs (Objects <= 32KB) */
+    if (LZ_LIKELY(size <= LZ_MAX_SLAB_OBJ_SIZE)) {
+        ensure_tls_init();
+        return lz_tlh_alloc(tls_tlh_ptr, size);
+    } 
+    /* 2. WARM PATH: Binned Spans (Objects up to 1MB) */
+    else if (size <= 1048576) {
+        ensure_tls_init();
+        return lz_span_alloc(tls_tlh_ptr, size);
+    }
+    /* 3. SLOW PATH: Direct VMM mmap for Huge Objects */
+    else {
         size_t payload_offset = 128; 
-        
         size_t required_bytes = payload_offset + size;
-        // Force the massive request to be a perfect multiple of the Huge Page size
         size_t total_bytes = LZ_ALIGN_UP(required_bytes, LZ_HUGE_PAGE_SIZE);
         
         void* ptr = lz_sys_alloc_huge_aligned(total_bytes);
@@ -187,15 +193,16 @@ void* lz_malloc(size_t size) {
         lz_chunk_header_t* header = (lz_chunk_header_t*)ptr;
         header->magic = LZ_CHUNK_MAGIC_V2;
         header->owning_tlh = NULL; 
-        header->is_lsm_region = 0;
+        header->chunk_type = LZ_CHUNK_TYPE_DIRECT;
+        header->checksum = lz_calc_checksum(header);
         
-        // Store metadata safely at offset 64
+        /* Store allocation footprint at Cache Line 2 */
         *((size_t*)((char*)ptr + LZ_CACHE_LINE_SIZE)) = total_bytes; 
         *((size_t*)((char*)ptr + LZ_CACHE_LINE_SIZE + sizeof(size_t))) = size;
         
         void* user_ptr = (void*)((char*)ptr + payload_offset);
         
-        // Register EVERY 2MB window in the Radix Tree for exclusivity
+        /* Register EVERY 2MB window in the Radix Tree */
         uintptr_t base_addr = (uintptr_t)ptr;
         for (size_t offset = 0; offset < total_bytes; offset += LZ_HUGE_PAGE_SIZE) {
             lz_rtree_set(base_addr + offset, header);
@@ -203,14 +210,12 @@ void* lz_malloc(size_t size) {
         
         return user_ptr;
     }
-    
-    ensure_tls_init();
-    return lz_tlh_alloc(tls_tlh_ptr, size);
 }
 
 void lz_free(void* ptr) {
     if (LZ_UNLIKELY(!ptr)) return;
 
+    /* O(1) Lookup: Who owns this memory? */
     lz_chunk_header_t* chunk = lz_rtree_get(ptr);
 
     if (!chunk) {
@@ -222,12 +227,11 @@ void lz_free(void* ptr) {
 
     if (LZ_UNLIKELY(chunk->magic != LZ_CHUNK_MAGIC_V2)) return;
 
-    if (LZ_UNLIKELY(chunk->owning_tlh == NULL && chunk->is_lsm_region == 0)) {
-        // Read total from our safe zone in Line 2
+    /* Direct Mmap Resolution */
+    if (LZ_UNLIKELY(chunk->chunk_type == LZ_CHUNK_TYPE_DIRECT)) {
         size_t total_bytes = *((size_t*)((char*)chunk + LZ_CACHE_LINE_SIZE));
         uintptr_t base_addr = (uintptr_t)chunk;
         
-        // Strictly clean all 2MB windows we hijacked
         for (size_t offset = 0; offset < total_bytes; offset += LZ_HUGE_PAGE_SIZE) {
             lz_rtree_clear(base_addr + offset);
         }
@@ -236,6 +240,7 @@ void lz_free(void* ptr) {
         return;
     }
 
+    /* Route to TLH (Which internally discriminates Slabs vs Spans) */
     ensure_tls_init();
     lz_tlh_free(tls_tlh_ptr, ptr); 
 }
@@ -250,8 +255,9 @@ void* lz_calloc(size_t num, size_t size) {
     void* ptr = lz_malloc(total_size);
     if (LZ_UNLIKELY(!ptr)) return NULL;
 
-    // OPTIMIZATION: If it went to the Large Path, the Kernel already zeroed it
-    if (LZ_LIKELY(total_size <= LZ_MAX_SLAB_OBJ_SIZE)) {
+    /* Only memset if memory came from our cached pools (Slabs/Spans). 
+     * Direct Mmap > 1MB is already guaranteed zeroed by the OS kernel. */
+    if (LZ_LIKELY(total_size <= 1048576)) {
         memset(ptr, 0, total_size);
     }
     
@@ -284,19 +290,21 @@ static inline int is_power_of_two(size_t x) {
 }
 
 void* lz_memalign(size_t alignment, size_t size) {
-    if (LZ_UNLIKELY(alignment == 0 || (alignment & (alignment - 1)) != 0)) return NULL;
+    if (LZ_UNLIKELY(alignment == 0 || !is_power_of_two(alignment))) return NULL;
 
-    /* FAST PATH: Small, natural alignments. 
-     * Our Slabs natively guarantee up to 64-byte alignment because Size Classes 
-     * are multiples of 16/32/64, and data_start is cache-line aligned. */
+    /* PATH 1: Slabs (Natively cache-line aligned up to 64 bytes) */
     if (alignment <= 64 && size <= LZ_MAX_SLAB_OBJ_SIZE) {
         size_t promoted_size = LZ_ALIGN_UP(size, alignment);
         return lz_malloc(promoted_size);
     }
 
-    /* VMM DIRECT PATH: Bypass Slabs for extreme alignment.
-     * Calculate a dynamic offset that accommodates both our 128 bytes 
-     * of mandatory metadata (Header + Size info) AND the requested alignment. */
+    /* PATH 2: Spans (Natively OS Page aligned to 4096 bytes) */
+    if (alignment <= LZ_PAGE_SIZE && size <= 1048576) {
+        ensure_tls_init();
+        return lz_span_alloc(tls_tlh_ptr, size);
+    }
+
+    /* PATH 3: Direct mmap for extreme alignment or massive sizes */
     size_t base_offset = 128; 
     size_t dynamic_offset = LZ_ALIGN_UP(base_offset, alignment);
     
@@ -309,15 +317,14 @@ void* lz_memalign(size_t alignment, size_t size) {
     lz_chunk_header_t* header = (lz_chunk_header_t*)ptr;
     header->magic = LZ_CHUNK_MAGIC_V2;
     header->owning_tlh = NULL; 
-    header->is_lsm_region = 0;
+    header->chunk_type = LZ_CHUNK_TYPE_DIRECT;
+    header->checksum = lz_calc_checksum(header);
     
-    /* Store internal size metadata securely in Cache Line 2 (offset 64) */
     *((size_t*)((char*)ptr + LZ_CACHE_LINE_SIZE)) = total_bytes; 
     *((size_t*)((char*)ptr + LZ_CACHE_LINE_SIZE + sizeof(size_t))) = size;
     
     void* user_ptr = (void*)((char*)ptr + dynamic_offset);
     
-    /* Register EVERY 2MB window in the Radix Tree for exclusive resolution */
     uintptr_t base_addr = (uintptr_t)ptr;
     for (size_t offset = 0; offset < total_bytes; offset += LZ_HUGE_PAGE_SIZE) {
         lz_rtree_set(base_addr + offset, header);
@@ -359,7 +366,7 @@ void* lz_pvalloc(size_t size) {
 }
 
 /* ========================================================================= *
- * POSIX API Extension (Metadata and Reflection)
+ * POSIX API Extension (Metadata Reflection)
  * ========================================================================= */
 
 size_t lz_malloc_usable_size(void* ptr) {
@@ -374,13 +381,21 @@ size_t lz_malloc_usable_size(void* ptr) {
     }
 
     if (LZ_UNLIKELY(chunk->magic != LZ_CHUNK_MAGIC_V2)) return 0;
-    if (LZ_UNLIKELY(chunk->is_lsm_region)) return 0;
 
-    if (LZ_UNLIKELY(chunk->owning_tlh == NULL)) {
-        size_t total_allocated = *((size_t*)((char*)chunk + LZ_CACHE_LINE_SIZE));
-        return total_allocated - 128;
+    if (chunk->chunk_type == LZ_CHUNK_TYPE_DIRECT) {
+        /* Read exact requested user size from Cache Line 2 */
+        return *((size_t*)((char*)chunk + LZ_CACHE_LINE_SIZE + sizeof(size_t)));
+    } 
+    else if (chunk->chunk_type == LZ_CHUNK_TYPE_SLAB) {
+        lz_slab_t* slab = (lz_slab_t*)((char*)chunk + LZ_CACHE_LINE_SIZE);
+        return slab->block_size;
+    } 
+    else if (chunk->chunk_type == LZ_CHUNK_TYPE_SPAN) {
+        lz_span_t* span = (lz_span_t*)((char*)chunk + LZ_CACHE_LINE_SIZE);
+        uintptr_t offset = (uintptr_t)ptr - (uintptr_t)chunk;
+        uint32_t start_page = (uint32_t)(offset / LZ_PAGE_SIZE);
+        return (size_t)(span->alloc_size_pages[start_page]) * LZ_PAGE_SIZE;
     }
 
-    lz_slab_t* slab = (lz_slab_t*)((char*)chunk + LZ_CACHE_LINE_SIZE);
-    return slab->block_size;
+    return 0;
 }

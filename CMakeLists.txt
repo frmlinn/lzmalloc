@@ -33,29 +33,26 @@ set(LZ_VMM_MAX_CACHED_CHUNKS 32 CACHE STRING "Max cached 2MB chunks per NUMA nod
 set(LZ_CHUNK_SHIFT 21 CACHE STRING "Bit shift for Chunk calculation (21 = 2MB)")
 set(LZ_BATCH_MAX_SIZE 64 CACHE STRING "Maximum objects in remote free batch")
 set(LZ_MAX_TELEMETRY_SLOTS 4096 CACHE STRING "Total slots in the SHM telemetry matrix")
-set(LZ_LSM_SLOTS_COUNT 16 CACHE STRING "Number of telemetry shards for LSM regions")
-
-# Dentro del if de Apple Silicon:
- # 32MB Huge pages requieren un shift de 25 bits
 
 # Architecture-specific tuning
 if(LZ_ARCH MATCHES "^(aarch64|arm64)")
     if(LZ_OS STREQUAL "Darwin")
-        # Apple Silicon (M1/M2/M3)
+        # Apple Silicon (M1/M2/M3) tuning
         set(LZ_CACHE_LINE_SIZE 128)
-        set(LZ_PAGE_SIZE 16384)       # 16KB Pages
-        set(LZ_HUGE_PAGE_SIZE 33554432) # 32MB Huge pages on macOS
+        set(LZ_PAGE_SIZE 16384)       
+        set(LZ_HUGE_PAGE_SIZE 33554432) 
         set(LZ_CHUNK_SHIFT 25)
         message(STATUS "Hardware Profile: Apple Silicon detected.")
     else()
-        # Generic ARM64 Linux
         message(STATUS "Hardware Profile: Generic ARM64 detected.")
     endif()
 elseif(LZ_ARCH MATCHES "^(x86_64|AMD64)")
     message(STATUS "Hardware Profile: Standard x86_64 detected.")
 endif()
 
-# Generate lz_config.h in the build directory
+# ==============================================================================
+# 3. Code Generation and Target Configuration
+# ==============================================================================
 configure_file(
     ${CMAKE_CURRENT_SOURCE_DIR}/lz_config.h.in
     ${CMAKE_CURRENT_BINARY_DIR}/lz_config.h
@@ -64,17 +61,16 @@ configure_file(
 
 add_subdirectory(external/lz-logger)
 
-# Collect all source files
 file(GLOB LIB_SRCS "src/*.c")
 
-# Library Target
 add_library(lzmalloc SHARED ${LIB_SRCS})
 
+# Target-specific compiler flags for ultra-high performance
 target_compile_options(lzmalloc PRIVATE
-    -Wall -Wextra 
+    -Wall -Wextra -Werror
     -fvisibility=hidden 
     -ftls-model=initial-exec
-    $<$<CONFIG:Release>:-O3>
+    $<$<CONFIG:Release>:-O3 -march=native -mtune=native>
     $<$<CONFIG:Debug>:-O0 -g>
 )
 
@@ -91,11 +87,15 @@ target_include_directories(lzmalloc PRIVATE
 target_link_libraries(lzmalloc PRIVATE pthread lz_logger)
 
 # ==============================================================================
-# 5. Tests Suite
+# 4. Tests Suite
 # ==============================================================================
 enable_testing()
 
-include_directories(${CMAKE_CURRENT_SOURCE_DIR}/external/lz-logger/include)
+# Definimos las cabeceras públicas (lzmalloc.h) y las del logger
+set(LZ_TEST_INCLUDES 
+    ${CMAKE_CURRENT_SOURCE_DIR}/include 
+    ${CMAKE_CURRENT_SOURCE_DIR}/external/lz-logger/include
+)
 
 add_executable(unit_test tests/unit_tests.c)
 target_link_libraries(unit_test PRIVATE lz_logger)

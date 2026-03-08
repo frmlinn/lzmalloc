@@ -1,8 +1,8 @@
 /**
  * @file unit_tests.c
- * @brief Core sanity checks for basic allocation primitives.
- * @details Validates the primary fast-paths (malloc, free) and memory 
- * initialization guarantees (calloc) of the lzmalloc engine.
+ * @brief Core sanity checks for the triple-hierarchy allocation primitives.
+ * @details Validates the primary fast-paths (Slabs), medium-paths (Spans), 
+ * and slow-paths (Direct Mmap) of the lzmalloc V2 engine.
  */
 
 #include <stdlib.h>
@@ -11,29 +11,36 @@
 #include "lz_log.h"
 
 /**
- * @brief Macro for clean assertions that use our custom async-signal-safe logger.
+ * @brief Macro for clean assertions using our async-signal-safe logger.
  */
 #define ASSERT_TEST(cond, msg) \
     do { if (LZ_LOG_UNLIKELY(!(cond))) { LZ_FATAL("Unit Test Failed: %s", msg); } } while(0)
 
 /**
- * @brief Tests basic Slab allocation (small sizes) and VMM direct allocation (huge sizes).
+ * @brief Tests allocation and deallocation across all three memory engines.
  */
 void test_basic_alloc_free(void) {
-    LZ_INFO("Running test_basic_alloc_free...");
+    LZ_INFO("Running test_basic_alloc_free (Triple Hierarchy Validation)...");
     
-    /* Small allocation: should be served by the Slab Allocator */
-    void* p1 = malloc(128);
-    ASSERT_TEST(p1 != NULL, "malloc(128) returned NULL");
-    memset(p1, 0xAA, 128); /* Prove memory is writable */
-    free(p1);
+    /* 1. Small allocation (128 Bytes): Served by the Slab Engine */
+    void* p_slab = malloc(128);
+    ASSERT_TEST(p_slab != NULL, "Slab allocation (128B) failed");
+    memset(p_slab, 0xAA, 128); 
+    free(p_slab);
 
-    /* Huge allocation: 3MB bypasses Slabs and hits the VMM / Huge Pages */
+    /* 2. Medium allocation (256 KB): Served by the Span Engine */
+    size_t span_size = 256 * 1024;
+    void* p_span = malloc(span_size);
+    ASSERT_TEST(p_span != NULL, "Span allocation (256KB) failed");
+    memset(p_span, 0xBB, span_size);
+    free(p_span);
+
+    /* 3. Huge allocation (3 MB): Served by Direct Mmap */
     size_t huge_size = 3 * 1024 * 1024; 
-    void* p2 = malloc(huge_size);
-    ASSERT_TEST(p2 != NULL, "malloc(3MB) returned NULL");
-    memset(p2, 0xBB, huge_size);
-    free(p2);
+    void* p_direct = malloc(huge_size);
+    ASSERT_TEST(p_direct != NULL, "Direct allocation (3MB) failed");
+    memset(p_direct, 0xCC, huge_size);
+    free(p_direct);
 
     LZ_INFO("test_basic_alloc_free PASSED.");
 }
@@ -45,7 +52,7 @@ void test_calloc_zeroing(void) {
     LZ_INFO("Running test_calloc_zeroing...");
     
     size_t num = 128;
-    size_t size = 16;
+    size_t size = 16; /* 2048 bytes total -> Slab Engine */
     uint8_t* ptr = (uint8_t*)calloc(num, size);
     ASSERT_TEST(ptr != NULL, "calloc returned NULL");
 

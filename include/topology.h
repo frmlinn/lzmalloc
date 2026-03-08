@@ -14,12 +14,18 @@
 
 struct lz_chunk_header_s;
 
+/* ========================================================================= *
+ * Core Data Structures
+ * ========================================================================= */
+
 /**
- * @brief Exclusive Chunk pool for a specific NUMA node.
+ * @struct lz_numa_pool_t
+ * @brief Lock-free Chunk pool isolated per NUMA node to guarantee local allocations.
+ * Padded to LZ_CACHE_LINE_SIZE to eliminate cross-node False Sharing.
  */
 typedef struct LZ_CACHE_ALIGNED {
-    _Atomic(struct lz_chunk_header_s*) free_chunks; // Treiber Stack 
-    _Atomic(size_t) available_count;
+    _Atomic(struct lz_chunk_header_s*) free_chunks; /**< Treiber Stack top pointer */
+    _Atomic(size_t) available_count;                /**< Current chunks available */
 } lz_numa_pool_t;
 
 /* ========================================================================= *
@@ -27,30 +33,29 @@ typedef struct LZ_CACHE_ALIGNED {
  * ========================================================================= */
 
 /**
- * @brief Initializes the system topology.
- * Must be called exactly once during allocator bootstrap (e.g., via constructor).
- * Discovers how many actual NUMA nodes the machine has.
+ * @brief Bootstraps the system topology detection mechanism.
+ * @note Must be invoked exactly once during the allocator's global initialization.
  */
 void lz_topology_init(void);
 
 /**
- * @brief Gets the total number of detected NUMA nodes.
- * @return Node count (minimum 1 for UMA systems).
+ * @brief Retrieves the total number of operational NUMA nodes detected.
+ * * @return Node count (defaults to 1 for UMA architectures).
  */
 uint32_t lz_topology_get_node_count(void);
 
 /**
- * @brief Gets the NUMA node ID where the calling thread is currently executing.
- * Uses a Thread-Local Storage (TLS) cache to avoid multiple syscall overheads.
- * @return Node ID (0 to LZ_MAX_NUMA_NODES - 1).
+ * @brief Dynamically fetches the NUMA node ID of the currently executing thread.
+ * Utilizes vDSO (SYS_getcpu) where available to prevent the NUMA Migration Trap.
+ * * @return The NUMA node ID (0 to LZ_MAX_NUMA_NODES - 1).
  */
 uint32_t lz_get_current_node(void);
 
 /**
- * @brief Gets a pointer to the Chunk pool of the specified node.
- * @param node_id The NUMA node ID.
- * @return Pointer to the corresponding lz_numa_pool_t.
+ * @brief Fetches the dedicated Chunk pool for a specific NUMA node.
+ * * @param node_id The target NUMA node ID.
+ * @return A pointer to the node's isolated lz_numa_pool_t.
  */
 lz_numa_pool_t* lz_topology_get_pool(uint32_t node_id);
 
-#endif // LZ_TOPOLOGY_H
+#endif /* LZ_TOPOLOGY_H */

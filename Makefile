@@ -2,22 +2,7 @@
 # lzmalloc - Wrapper Makefile for CMake automation
 # =========================================================================
 
-# Force Clang by default, but allow overrides
 CC ?= clang
-BUILD_DIR_RELEASE = build/release
-BUILD_DIR_DEBUG = build/debug
-
-.PHONY: all release debug clean
-
-# By default, compile the hyper-optimized release version
-all: release
-
-release:
-# =========================================================================
-# lzmalloc - Wrapper Makefile for CMake automation
-# =========================================================================
-
-CC := clang
 BUILD_DIR_RELEASE = build/release
 BUILD_DIR_DEBUG = build/debug
 

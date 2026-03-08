@@ -1,7 +1,8 @@
 /**
  * @file lzmalloc.h
- * @brief Public Interface (Layer 5) of the lzmalloc V2 general allocator.
- * Compatible with the standard POSIX memory management API.
+ * @brief Public Interface (Layer 5) of the lzmalloc V2 unified allocator.
+ * @details Fully POSIX-compliant interface exposing the triple-hierarchy memory 
+ * engines (Slabs, Binned Spans, and Direct Mmap) under a single, seamless API.
  */
 
 #ifndef LZ_MALLOC_H
@@ -14,98 +15,91 @@ extern "C" {
 #endif
 
 /**
- * @brief Initializes the global system (Layers 0, 1, 2).
- * Must be called before any memory allocation occurs.
+ * @brief Bootstraps the global memory management system (Layers 0, 1, 2).
+ * @note Must be explicitly called before any allocation if POSIX hooks are bypassed.
  */
 void lz_system_init(void);
 
 /**
  * @brief Allocates a memory block of at least 'size' bytes.
- * @param size Size in bytes.
- * @return Pointer to the allocated block, or NULL if 'size' is 0 or system is OOM.
+ * @details Automatically routes the request:
+ * - <= 32KB: Ultra-fast Slab Engine (O(1)).
+ * - 32KB to 1MB: Binned Bitmap Span Engine (Zero internal fragmentation).
+ * - > 1MB: Direct OS Mmap Engine via VMM.
+ * @param size Requested size in bytes.
+ * @return Pointer to the allocated block, or NULL on OOM.
  */
 void* lz_malloc(size_t size);
 
 /**
  * @brief Frees a previously allocated memory block.
- * @param ptr Pointer to the block. If NULL, the function does nothing.
+ * @details Resolves the underlying engine via the lock-free Radix Tree in O(1).
+ * Supports remote cross-thread freeing via atomic batching.
+ * @param ptr Pointer to the memory block. Safe to pass NULL.
  */
 void lz_free(void* ptr);
 
 /**
- * @brief Allocates memory for an array of 'num' elements of 'size' bytes each.
- * The returned memory is zero-initialized.
+ * @brief Allocates zero-initialized memory for an array of elements.
  * @param num Number of elements.
  * @param size Size of each element.
- * @return Pointer to the zeroed block, or NULL on error or overflow.
+ * @return Pointer to the zeroed block, or NULL on overflow/OOM.
  */
 void* lz_calloc(size_t num, size_t size);
 
 /**
  * @brief Resizes a previously allocated memory block.
- * Attempts an in-place resize if the Size Class allows it.
  * @param ptr Pointer to the original block.
- * @param new_size The new desired size.
- * @return Pointer to the new block (might be the same as 'ptr'), or NULL on failure.
+ * @param new_size The newly requested size.
+ * @return Pointer to the resized block, or NULL on failure.
  */
 void* lz_realloc(void* ptr, size_t new_size);
 
 /**
- * @brief Forces a Garbage Collection run in the allocator.
- * Iterates through dead threads (Zombies), processing their pending frees
- * and returning empty memory back to the Operating System.
- * @note Ideal for calling from background threads (e.g., compaction threads).
+ * @brief Forces an asynchronous Garbage Collection run.
+ * @details Iterates over Zombie threads, reaping their remote frees and 
+ * returning completely empty Superblocks (Chunks) back to the OS via MADV_DONTNEED.
  */
 void lzmalloc_gc(void);
 
 /**
- * @brief Allocates memory with a strict alignment boundary.
- * @details Forwards small, naturally aligned requests to the Slab engine. 
- * For large or strictly aligned requests (> 64 bytes), it bypasses the TLH
- * and requests a Huge Page directly from the VMM, dynamically calculating
- * the payload offset to satisfy the alignment while preserving the chunk header.
- * * @param alignment Desired alignment (must be a power of 2).
- * @param size Size in bytes to allocate.
+ * @brief Allocates memory with a strict power-of-two alignment boundary.
+ * @param alignment Desired alignment.
+ * @param size Size in bytes.
  * @return Pointer to the aligned memory, or NULL on error.
  */
 void* lz_memalign(size_t alignment, size_t size);
 
 /**
- * @brief Allocates aligned memory guaranteeing the modern POSIX standard.
- * @param memptr Double indirection pointer where the result will be stored.
- * @param alignment Alignment (must be a power of 2 and a multiple of sizeof(void*)).
- * @param size Size to allocate.
- * @return 0 on success, EINVAL if alignment is invalid, ENOMEM if OOM.
+ * @brief POSIX standard compliant aligned allocation.
+ * @param memptr Double pointer where the resulting address is stored.
+ * @param alignment Desired alignment (Must be multiple of sizeof(void*)).
+ * @param size Size in bytes.
+ * @return 0 on success, EINVAL/ENOMEM on error.
  */
 int lz_posix_memalign(void **memptr, size_t alignment, size_t size);
 
 /**
- * @brief Allocates aligned memory (C11 Standard).
- * @param alignment Desired alignment (must be a power of 2).
- * @param size Size to allocate (should be a multiple of alignment according to C11).
- * @return Pointer to the aligned memory, or NULL on error.
+ * @brief C11 standard compliant aligned allocation.
  */
 void* lz_aligned_alloc(size_t alignment, size_t size);
 
 /**
- * @brief Allocates memory aligned to the OS Page Size.
- * @param size Size to allocate.
- * @return Pointer to page-aligned memory, or NULL.
+ * @brief Allocates memory aligned to the underlying OS Page Size.
  */
 void* lz_valloc(size_t size);
 
 /**
- * @brief Allocates page-aligned memory and rounds the size up to a multiple of the page size.
- * @param size Base size to allocate.
- * @return Pointer to aligned and rounded memory, or NULL.
+ * @brief Allocates page-aligned memory, rounding the requested size up.
  */
 void* lz_pvalloc(size_t size);
 
 /**
- * @brief Returns the actual size of the memory block backing the pointer.
- * Essential for std::vector and std::string implementations in C++.
- * @param ptr Pointer previously allocated by the POSIX engine.
- * @return The total usable size in bytes, or 0 if the pointer is invalid/foreign.
+ * @brief Introspects the actual backing capacity of an allocated pointer.
+ * @details Essential for high-performance C++ containers (std::vector/std::string)
+ * to utilize the geometric padding of Slabs and Spans without reallocation.
+ * @param ptr Pointer managed by the lzmalloc engine.
+ * @return The precise usable size in bytes, or 0 if invalid.
  */
 size_t lz_malloc_usable_size(void* ptr);
 
@@ -113,4 +107,4 @@ size_t lz_malloc_usable_size(void* ptr);
 }
 #endif
 
-#endif // LZ_MALLOC_H
+#endif /* LZ_MALLOC_H */

@@ -12,7 +12,7 @@
  * Global State
  * ========================================================================= */
 
-/** @brief Unique global secret generated at process bootstrap. */
+/** @brief Unique global secret generated cryptographically at process bootstrap. */
 extern uintptr_t g_lz_global_secret;
 
 /* ========================================================================= *
@@ -20,17 +20,17 @@ extern uintptr_t g_lz_global_secret;
  * ========================================================================= */
 
 /**
- * @brief Initializes the security seed using cryptographic PRNG.
- * Must be called exactly once during process startup.
+ * @brief Bootstraps the security seed using a cryptographic PRNG.
+ * @note Must be invoked exactly once during the process startup phase.
  */
 void lz_security_init(void);
 
 /**
- * @brief Encrypts or decrypts a pointer using XOR (Safe Linking).
- * Prevents heap-exploitation techniques like Use-After-Free list hijacking.
- * @param ptr The pointer to obfuscate/deobfuscate.
- * @param storage_addr The memory address where the pointer will be stored.
- * @return The obfuscated/deobfuscated pointer.
+ * @brief Encrypts or decrypts a pointer using fast XOR operations (Safe Linking).
+ * Prevents advanced heap-exploitation techniques such as Use-After-Free list hijacking.
+ * * @param ptr The target pointer to obfuscate/deobfuscate.
+ * @param storage_addr The memory address where the pointer will physically reside.
+ * @return The cryptographically masked pointer.
  */
 static LZ_ALWAYS_INLINE void* lz_ptr_obfuscate(void* ptr, void* storage_addr) {
     uintptr_t p = (uintptr_t)ptr;
@@ -38,4 +38,4 @@ static LZ_ALWAYS_INLINE void* lz_ptr_obfuscate(void* ptr, void* storage_addr) {
     return (void*)(p ^ g_lz_global_secret ^ s);
 }
 
-#endif // LZ_SECURITY_H
+#endif /* LZ_SECURITY_H */
