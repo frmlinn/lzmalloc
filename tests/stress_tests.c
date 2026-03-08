@@ -13,7 +13,6 @@
 #include <stdatomic.h>
 #include <sched.h>
 #include "lz_log.h"
-#include "lzmalloc.h"
 
 #define NUM_PRODUCERS 40
 #define NUM_CONSUMERS 40
