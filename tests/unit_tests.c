@@ -2,7 +2,7 @@
  * @file unit_tests.c
  * @brief Core sanity checks for the triple-hierarchy allocation primitives.
  * @details Validates the primary fast-paths (Slabs), medium-paths (Spans), 
- * and slow-paths (Direct Mmap) of the lzmalloc V2 engine.
+ * and slow-paths (Direct Mmap) of the lzmalloc V2 engine using standard POSIX hooks.
  */
 
 #include <stdlib.h>
@@ -11,15 +11,15 @@
 #include "lz_log.h"
 
 /**
- * @brief Macro for clean assertions using our async-signal-safe logger.
+ * @brief Macro for clean assertions using the async-signal-safe logger.
  */
 #define ASSERT_TEST(cond, msg) \
-    do { if (LZ_LOG_UNLIKELY(!(cond))) { LZ_FATAL("Unit Test Failed: %s", msg); } } while(0)
+    do { if (LZ_LOG_UNLIKELY(!(cond))) { LZ_FATAL("Unit Test Failed: %s", msg); exit(EXIT_FAILURE); } } while(0)
 
 /**
  * @brief Tests allocation and deallocation across all three memory engines.
  */
-void test_basic_alloc_free(void) {
+static void test_basic_alloc_free(void) {
     LZ_INFO("Running test_basic_alloc_free (Triple Hierarchy Validation)...");
     
     /* 1. Small allocation (128 Bytes): Served by the Slab Engine */
@@ -35,7 +35,7 @@ void test_basic_alloc_free(void) {
     memset(p_span, 0xBB, span_size);
     free(p_span);
 
-    /* 3. Huge allocation (3 MB): Served by Direct Mmap */
+    /* 3. Huge allocation (3 MB): Served by Direct Mmap Engine */
     size_t huge_size = 3 * 1024 * 1024; 
     void* p_direct = malloc(huge_size);
     ASSERT_TEST(p_direct != NULL, "Direct allocation (3MB) failed");
@@ -48,11 +48,11 @@ void test_basic_alloc_free(void) {
 /**
  * @brief Ensures calloc strictly zeroes out the returned memory block.
  */
-void test_calloc_zeroing(void) {
+static void test_calloc_zeroing(void) {
     LZ_INFO("Running test_calloc_zeroing...");
     
     size_t num = 128;
-    size_t size = 16; /* 2048 bytes total -> Slab Engine */
+    size_t size = 16; /* 2048 bytes total -> Slab Engine routing */
     uint8_t* ptr = (uint8_t*)calloc(num, size);
     ASSERT_TEST(ptr != NULL, "calloc returned NULL");
 
@@ -69,5 +69,5 @@ int main(void) {
     test_basic_alloc_free();
     test_calloc_zeroing();
     LZ_INFO("=== ALL UNIT TESTS PASSED ===");
-    return 0;
+    return EXIT_SUCCESS;
 }

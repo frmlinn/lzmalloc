@@ -72,7 +72,7 @@ void lz_tlh_flush_outgoing_batch(lz_tlh_t* tlh) {
     lz_tlh_t* target = batch->target_tlh;
     lz_free_node_t* old_head = atomic_load_explicit(&target->remote_free_head, memory_order_relaxed);
     
-    /* Lock-free Compare-And-Swap loop to push the entire batch in O(1) */
+    /* ABA-Free Lock-free Compare-And-Swap loop */
     do {
         batch->tail->next = old_head; 
     } while (!atomic_compare_exchange_weak_explicit(&target->remote_free_head, 
@@ -87,7 +87,6 @@ void lz_tlh_flush_outgoing_batch(lz_tlh_t* tlh) {
 }
 
 void lz_tlh_reap(lz_tlh_t* tlh) {
-    /* Extract the entire linked list of remote frees in a single atomic sweep */
     lz_free_node_t* head = atomic_exchange_explicit(&tlh->remote_free_head, NULL, memory_order_acquire);
     if (LZ_LIKELY(!head)) {
         return;
@@ -99,7 +98,6 @@ void lz_tlh_reap(lz_tlh_t* tlh) {
         lz_free_node_t* next_clear = head->next;
         lz_chunk_header_t* chunk = (lz_chunk_header_t*)((uintptr_t)head & chunk_mask);
         
-        /* ROUTING: Discriminate payload type and route to the correct engine */
         if (LZ_LIKELY(chunk->chunk_type == LZ_CHUNK_TYPE_SLAB)) {
             lz_slab_t* slab = (lz_slab_t*)((char*)chunk + LZ_CACHE_LINE_SIZE);
             
@@ -108,9 +106,23 @@ void lz_tlh_reap(lz_tlh_t* tlh) {
             slab->free_list_head = head;
             
             slab->used_objects--;
+
+            /* CRITICAL FIX: Rescue slabs from full_list to prevent Producer-Consumer leaks */
+            if (LZ_UNLIKELY(slab->used_objects == slab->max_objects - 1)) {
+                lz_tlh_rescue_from_full(tlh, slab);
+            }
             
             if (LZ_UNLIKELY(slab->used_objects == 0)) {
                 lz_tlh_recycle_empty_slab(tlh, slab);
+            }
+
+            /* CRITICAL FIX: Missing Telemetry on remote frees */
+            if (LZ_UNLIKELY(tlh->stat_slot)) {
+                tlh->local_bytes_free_batch += slab->block_size;
+                if (LZ_UNLIKELY(tlh->local_bytes_free_batch >= 4096)) {
+                    atomic_fetch_sub_explicit(&tlh->stat_slot->data.bytes_allocated, tlh->local_bytes_free_batch, memory_order_relaxed);
+                    tlh->local_bytes_free_batch = 0;
+                }
             }
         } 
         else if (chunk->chunk_type == LZ_CHUNK_TYPE_SPAN) {
@@ -125,10 +137,6 @@ void lz_tlh_reap(lz_tlh_t* tlh) {
  * Main API: Alloc Helpers (Cold Path Extraction)
  * ========================================================================= */
 
-/**
- * @brief Extracted slow-path for Slab allocation. 
- * Minimizes the instruction footprint of the fast-path in the CPU L1i cache.
- */
 static __attribute__((noinline)) void* lz_tlh_alloc_slow(lz_tlh_t* tlh, lz_bin_t* bin, uint32_t sc_idx) {
     lz_slab_t* slab = bin->current_slab;
     void* ptr = NULL;
@@ -203,6 +211,11 @@ void lz_tlh_init(lz_tlh_t* tlh, uint32_t tid) {
 }
 
 void* lz_tlh_alloc(lz_tlh_t* tlh, size_t size) {
+    /* CRITICAL FIX: Direct Large Object Routing to prevent out-of-bounds Read */
+    if (LZ_UNLIKELY(size > LZ_MAX_SLAB_OBJ_SIZE)) {
+        return lz_span_alloc(tlh, size);
+    }
+
     uint32_t sc_idx = lz_size_to_class(size);
     lz_bin_t* bin = &tlh->bins[sc_idx];
     lz_slab_t* slab = bin->current_slab;
@@ -221,6 +234,10 @@ void* lz_tlh_alloc(lz_tlh_t* tlh, size_t size) {
     /* 2. WARM PATH: Reap Remote Frees & Bump Allocation */
     else {
         lz_tlh_reap(tlh);
+        
+        /* Must re-evaluate slab because reap might have changed bin state */
+        slab = bin->current_slab;
+        
         if (slab && slab->free_list_head) {
             lz_free_node_t* node = (lz_free_node_t*)slab->free_list_head;
             slab->free_list_head = lz_ptr_obfuscate(node->next, &node->next);
@@ -255,7 +272,7 @@ void* lz_tlh_alloc(lz_tlh_t* tlh, size_t size) {
     if (LZ_UNLIKELY(tlh->stat_slot)) {
         tlh->local_bytes_alloc_batch += allocated_size;
         if (LZ_UNLIKELY(tlh->local_bytes_alloc_batch >= 1048576)) {
-            atomic_fetch_add_explicit(&tlh->stat_slot->bytes_allocated, tlh->local_bytes_alloc_batch, memory_order_relaxed);
+            atomic_fetch_add_explicit(&tlh->stat_slot->data.bytes_allocated, tlh->local_bytes_alloc_batch, memory_order_relaxed);
             tlh->local_bytes_alloc_batch = 0;
         }
     }
@@ -269,7 +286,6 @@ void lz_tlh_free(lz_tlh_t* tlh, void* ptr) {
     uintptr_t chunk_mask = ~(((uintptr_t)1 << LZ_CHUNK_SHIFT) - 1);
     lz_chunk_header_t* chunk = (lz_chunk_header_t*)((uintptr_t)ptr & chunk_mask);
 
-    /* Radix Tree fallback to prevent false chunk starts on maliciously offset pointers */
     if (LZ_UNLIKELY(chunk->magic != LZ_CHUNK_MAGIC_V2)) {
         chunk = lz_rtree_get(ptr); 
         if (!chunk) return; 
@@ -277,7 +293,6 @@ void lz_tlh_free(lz_tlh_t* tlh, void* ptr) {
 
     /* 1. LOCAL FREE */
     if (LZ_LIKELY(chunk->owning_tlh == tlh)) {
-        /* ROUTING: Route to corresponding internal engine */
         if (LZ_LIKELY(chunk->chunk_type == LZ_CHUNK_TYPE_SLAB)) {
             lz_slab_t* slab = (lz_slab_t*)((char*)chunk + LZ_CACHE_LINE_SIZE);
             lz_free_node_t* node = (lz_free_node_t*)ptr;
@@ -295,11 +310,10 @@ void lz_tlh_free(lz_tlh_t* tlh, void* ptr) {
                 lz_tlh_recycle_empty_slab(tlh, slab);
             }
 
-            /* Fast telemetry batching for Slabs */
             if (LZ_UNLIKELY(tlh->stat_slot)) {
                 tlh->local_bytes_free_batch += slab->block_size;
                 if (LZ_UNLIKELY(tlh->local_bytes_free_batch >= 4096)) {
-                    atomic_fetch_sub_explicit(&tlh->stat_slot->bytes_allocated, tlh->local_bytes_free_batch, memory_order_relaxed);
+                    atomic_fetch_sub_explicit(&tlh->stat_slot->data.bytes_allocated, tlh->local_bytes_free_batch, memory_order_relaxed);
                     tlh->local_bytes_free_batch = 0;
                 }
             }
@@ -308,7 +322,7 @@ void lz_tlh_free(lz_tlh_t* tlh, void* ptr) {
             lz_span_free_local(tlh, chunk, ptr);
         }
     }
-    /* 2. REMOTE FREE (Unified Batching for all engines) */
+    /* 2. REMOTE FREE (Unified Batching) */
     else {
         lz_tlh_t* owner = (lz_tlh_t*)chunk->owning_tlh;
         lz_batch_t* batch = &tlh->outgoing_batch;

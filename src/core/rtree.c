@@ -22,6 +22,7 @@ lz_rtree_root_t g_rtree_root;
  * Bypasses the allocator itself to prevent recursive deadlocks during bootstrap.
  */
 static void* alloc_internal_node(size_t size) {
+    /* MAP_ANONYMOUS mathematically guarantees pages are filled with zeroes */
     void* ptr = mmap(NULL, size, PROT_READ | PROT_WRITE, 
                      MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     return (ptr == MAP_FAILED) ? NULL : ptr;
@@ -44,13 +45,17 @@ void lz_rtree_set(uintptr_t chunk_addr, lz_chunk_header_t* metadata) {
 
     lz_rtree_leaf_t* leaf = atomic_load_explicit(&g_rtree_root.leaves[l1_idx], memory_order_acquire);
     
+    /* FAST EXIT: Do not map a new 128KB leaf just to write a NULL value */
+    if (LZ_UNLIKELY(!leaf && !metadata)) {
+        return;
+    }
+
     if (LZ_UNLIKELY(!leaf)) {
         lz_rtree_leaf_t* new_leaf = (lz_rtree_leaf_t*)alloc_internal_node(sizeof(lz_rtree_leaf_t));
         if (!new_leaf) return; /* Unrecoverable OS memory exhaustion */
 
-        for (int i = 0; i < LZ_RTREE_L2_ENTRIES; ++i) {
-            atomic_init(&new_leaf->entries[i], NULL);
-        }
+        /* Optimization: Skipped the O(N) atomic_init loop. MAP_ANONYMOUS guarantees 
+         * zeroed bytes, which safely represent an atomic NULL pointer in POSIX. */
 
         /* Lock-free Compare-And-Swap. Resolves initialization races between threads. */
         lz_rtree_leaf_t* expected = NULL;

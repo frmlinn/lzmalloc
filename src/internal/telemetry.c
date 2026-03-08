@@ -9,9 +9,12 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
-#include <stdio.h>
 #include <string.h>
-#include <stdlib.h> 
+
+/* ========================================================================= *
+ * External Environment Access (Avoiding libc getenv)
+ * ========================================================================= */
+extern char **environ;
 
 /* ========================================================================= *
  * Global State
@@ -20,16 +23,62 @@
 /** @brief Global pointer to the memory-mapped telemetry matrix. */
 static lz_stat_slot_t* g_telemetry_matrix = NULL;
 
-/** @brief Process-specific SHM file name. Cached for safe atexit cleanup. */
+/** @brief Process-specific SHM file name. Cached for fast reference. */
 static char g_shm_name[128] = {0};
+
+/* ========================================================================= *
+ * Allocation-Free Internal Utilities
+ * ========================================================================= */
+
+/**
+ * @brief Searches for an environment variable without triggering libc memory allocations.
+ */
+static bool lz_internal_has_env(const char* key) {
+    if (environ == NULL || key == NULL) return false;
+    
+    size_t key_len = 0;
+    while (key[key_len] != '\0') key_len++;
+
+    for (char **env = environ; *env != NULL; env++) {
+        if (strncmp(*env, key, key_len) == 0 && (*env)[key_len] == '=') {
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
+ * @brief Converts an integer to a string directly into a buffer without snprintf/malloc.
+ */
+static void lz_itoa_fast(int val, char* buf, size_t* len) {
+    char temp[32];
+    int i = 0;
+    
+    if (val == 0) {
+        temp[i++] = '0';
+    } else {
+        while (val > 0) {
+            temp[i++] = (char)((val % 10) + '0');
+            val /= 10;
+        }
+    }
+    
+    for (int j = 0; j < i; j++) {
+        buf[j] = temp[i - 1 - j];
+    }
+    buf[i] = '\0';
+    *len = (size_t)i;
+}
 
 /* ========================================================================= *
  * Implementation
  * ========================================================================= */
 
 /**
- * @brief atexit hook to unlink the SHM file upon process termination.
+ * @brief Library destructor. Unlinks the SHM file securely upon process exit.
+ * Executed after the main() function completes or during dlclose().
  */
+__attribute__((destructor))
 static void lz_telemetry_cleanup(void) {
     if (g_shm_name[0] != '\0') {
         shm_unlink(g_shm_name);
@@ -37,22 +86,27 @@ static void lz_telemetry_cleanup(void) {
 }
 
 void lz_telemetry_init(void) {
-    // 1. Guard against double initialization
     if (LZ_UNLIKELY(g_telemetry_matrix != NULL)) {
         return; 
     }
 
-    // 2. Guard: Feature flag check (Missing in original implementation)
-    if (getenv("LZMALLOC_TELEMETRY") == NULL) {
+    /* Zero-allocation environment variable check */
+    if (!lz_internal_has_env("LZMALLOC_TELEMETRY")) {
         return;
     }
 
-    snprintf(g_shm_name, sizeof(g_shm_name), "/lzmalloc_telemetry_%d", getpid());
+    /* Construct the SHM name manually: "/lzmalloc_telemetry_<PID>" */
+    const char* prefix = "/lzmalloc_telemetry_";
+    size_t prefix_len = 20;
+    memcpy(g_shm_name, prefix, prefix_len);
+    
+    size_t pid_len = 0;
+    lz_itoa_fast(getpid(), g_shm_name + prefix_len, &pid_len);
 
-    // 3. Create/Open the file in tmpfs (pure RAM)
+    /* Create/Open the file in tmpfs (pure RAM) */
     int fd = shm_open(g_shm_name, O_CREAT | O_RDWR, 0666);
     if (LZ_UNLIKELY(fd == -1)) {
-        return; // Silent fallback: run without telemetry
+        return; 
     }
 
     size_t matrix_size = sizeof(lz_stat_slot_t) * LZ_MAX_TELEMETRY_SLOTS;
@@ -62,15 +116,14 @@ void lz_telemetry_init(void) {
         return;
     }
 
-    // 4. Map the entire matrix into our process memory space
-    g_telemetry_matrix = mmap(NULL, matrix_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    /* Map the entire matrix into our process memory space */
+    g_telemetry_matrix = mmap(NULL, matrix_size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_POPULATE, fd, 0);
     
     if (LZ_UNLIKELY(g_telemetry_matrix == MAP_FAILED)) {
         g_telemetry_matrix = NULL;
     } else {
-        // Zero-initialize all counters and register cleanup
+        /* Force memory initialization if MAP_POPULATE is not honored by the OS */
         memset(g_telemetry_matrix, 0, matrix_size); 
-        atexit(lz_telemetry_cleanup); 
     }
     
     close(fd);

@@ -26,17 +26,14 @@
 
 static __thread lz_tlh_t* tls_tlh_ptr = NULL;
 static _Atomic uint32_t g_thread_counter = 0;
-static _Atomic(lz_tlh_t*) g_zombie_tlhs = NULL;
+static lz_tlh_t* g_zombie_tlhs = NULL;
+static atomic_flag g_zombie_lock = ATOMIC_FLAG_INIT; /* ABA Prevention */
 static pthread_key_t g_tlh_key;
 
 /* ========================================================================= *
  * Internal Helpers for Large Object Path
  * ========================================================================= */
 
-/**
- * @brief Allocates massive objects directly from the VMM, bypassing the TLH.
- * Aligns requests strictly to 2MB to integrate seamlessly with the Radix Tree.
- */
 static void* lz_sys_alloc_huge_aligned(size_t total_size) {
     size_t request_size = total_size + LZ_HUGE_PAGE_SIZE;
     
@@ -72,23 +69,26 @@ static void* lz_sys_alloc_huge_aligned(size_t total_size) {
  * ========================================================================= */
 
 static lz_tlh_t* lz_resurrect_zombie(void) {
-    lz_tlh_t* head = atomic_load_explicit(&g_zombie_tlhs, memory_order_acquire);
-    while (head != NULL) {
-        if (atomic_compare_exchange_weak_explicit(&g_zombie_tlhs, 
-                                                  &head, head->next_zombie,
-                                                  memory_order_acquire, 
-                                                  memory_order_relaxed)) {
-            head->next_zombie = NULL;
-            return head;
-        }
+    while (atomic_flag_test_and_set_explicit(&g_zombie_lock, memory_order_acquire)) {
+        lz_cpu_relax();
     }
-    return NULL; 
+    lz_tlh_t* head = g_zombie_tlhs;
+    if (head != NULL) {
+        g_zombie_tlhs = head->next_zombie;
+        head->next_zombie = NULL;
+    }
+    atomic_flag_clear_explicit(&g_zombie_lock, memory_order_release);
+    return head; 
 }
 
+__attribute__((visibility("default")))
 void lzmalloc_gc(void) {
-    lz_tlh_t* current = atomic_load_explicit(&g_zombie_tlhs, memory_order_acquire);
+    while (atomic_flag_test_and_set_explicit(&g_zombie_lock, memory_order_acquire)) lz_cpu_relax();
+    lz_tlh_t* current = g_zombie_tlhs;
+    atomic_flag_clear_explicit(&g_zombie_lock, memory_order_release);
+
     while (current != NULL) {
-        lz_tlh_reap(current); /* Sweeps remote frees into the correct engine */
+        lz_tlh_reap(current); 
         current = current->next_zombie;
     }
 }
@@ -105,10 +105,10 @@ static void lz_tlh_destructor(void* arg) {
     
     if (tlh->stat_slot) {
         if (tlh->local_bytes_alloc_batch > 0) {
-            atomic_fetch_add_explicit(&tlh->stat_slot->bytes_allocated, tlh->local_bytes_alloc_batch, memory_order_relaxed);
+            atomic_fetch_add_explicit(&tlh->stat_slot->data.bytes_allocated, tlh->local_bytes_alloc_batch, memory_order_relaxed);
         }
         if (tlh->local_bytes_free_batch > 0) {
-            atomic_fetch_sub_explicit(&tlh->stat_slot->bytes_allocated, tlh->local_bytes_free_batch, memory_order_relaxed);
+            atomic_fetch_sub_explicit(&tlh->stat_slot->data.bytes_allocated, tlh->local_bytes_free_batch, memory_order_relaxed);
         }
         tlh->local_bytes_alloc_batch = 0;
         tlh->local_bytes_free_batch = 0;
@@ -116,13 +116,10 @@ static void lz_tlh_destructor(void* arg) {
 
     tlh->is_zombie = 1;
 
-    lz_tlh_t* old_head = atomic_load_explicit(&g_zombie_tlhs, memory_order_relaxed);
-    do {
-        tlh->next_zombie = old_head;
-    } while (!atomic_compare_exchange_weak_explicit(&g_zombie_tlhs, 
-                                                    &old_head, tlh,
-                                                    memory_order_release, 
-                                                    memory_order_relaxed));
+    while (atomic_flag_test_and_set_explicit(&g_zombie_lock, memory_order_acquire)) lz_cpu_relax();
+    tlh->next_zombie = g_zombie_tlhs;
+    g_zombie_tlhs = tlh;
+    atomic_flag_clear_explicit(&g_zombie_lock, memory_order_release);
 }
 
 void lz_system_init(void) {
@@ -130,8 +127,16 @@ void lz_system_init(void) {
     lz_vmm_init();      
     lz_rtree_init();    
     pthread_key_create(&g_tlh_key, lz_tlh_destructor);
-    if (getenv("LZMALLOC_TELEMETRY") != NULL) {
-        lz_telemetry_init();
+    
+    /* Using environ indirectly to avoid malloc during bootstrap */
+    extern char **environ;
+    if (environ) {
+        for (char **env = environ; *env != NULL; env++) {
+            if (strncmp(*env, "LZMALLOC_TELEMETRY=", 19) == 0) {
+                lz_telemetry_init();
+                break;
+            }
+        }
     }
 }
 
@@ -171,17 +176,14 @@ static LZ_ALWAYS_INLINE void ensure_tls_init(void) {
 void* lz_malloc(size_t size) {
     if (LZ_UNLIKELY(size == 0)) size = 1;
 
-    /* 1. FAST PATH: Slabs (Objects <= 32KB) */
     if (LZ_LIKELY(size <= LZ_MAX_SLAB_OBJ_SIZE)) {
         ensure_tls_init();
         return lz_tlh_alloc(tls_tlh_ptr, size);
     } 
-    /* 2. WARM PATH: Binned Spans (Objects up to 1MB) */
     else if (size <= 1048576) {
         ensure_tls_init();
         return lz_span_alloc(tls_tlh_ptr, size);
     }
-    /* 3. SLOW PATH: Direct VMM mmap for Huge Objects */
     else {
         size_t payload_offset = 128; 
         size_t required_bytes = payload_offset + size;
@@ -194,15 +196,18 @@ void* lz_malloc(size_t size) {
         header->magic = LZ_CHUNK_MAGIC_V2;
         header->owning_tlh = NULL; 
         header->chunk_type = LZ_CHUNK_TYPE_DIRECT;
+        
+        /* STRICT FIX: Initialize metadata before computing checksum */
+        header->node_id = 0;
+        header->canary = 0;
+        header->next = NULL;
         header->checksum = lz_calc_checksum(header);
         
-        /* Store allocation footprint at Cache Line 2 */
         *((size_t*)((char*)ptr + LZ_CACHE_LINE_SIZE)) = total_bytes; 
         *((size_t*)((char*)ptr + LZ_CACHE_LINE_SIZE + sizeof(size_t))) = size;
         
         void* user_ptr = (void*)((char*)ptr + payload_offset);
         
-        /* Register EVERY 2MB window in the Radix Tree */
         uintptr_t base_addr = (uintptr_t)ptr;
         for (size_t offset = 0; offset < total_bytes; offset += LZ_HUGE_PAGE_SIZE) {
             lz_rtree_set(base_addr + offset, header);
@@ -215,7 +220,6 @@ void* lz_malloc(size_t size) {
 void lz_free(void* ptr) {
     if (LZ_UNLIKELY(!ptr)) return;
 
-    /* O(1) Lookup: Who owns this memory? */
     lz_chunk_header_t* chunk = lz_rtree_get(ptr);
 
     if (!chunk) {
@@ -227,7 +231,6 @@ void lz_free(void* ptr) {
 
     if (LZ_UNLIKELY(chunk->magic != LZ_CHUNK_MAGIC_V2)) return;
 
-    /* Direct Mmap Resolution */
     if (LZ_UNLIKELY(chunk->chunk_type == LZ_CHUNK_TYPE_DIRECT)) {
         size_t total_bytes = *((size_t*)((char*)chunk + LZ_CACHE_LINE_SIZE));
         uintptr_t base_addr = (uintptr_t)chunk;
@@ -240,7 +243,6 @@ void lz_free(void* ptr) {
         return;
     }
 
-    /* Route to TLH (Which internally discriminates Slabs vs Spans) */
     ensure_tls_init();
     lz_tlh_free(tls_tlh_ptr, ptr); 
 }
@@ -255,8 +257,6 @@ void* lz_calloc(size_t num, size_t size) {
     void* ptr = lz_malloc(total_size);
     if (LZ_UNLIKELY(!ptr)) return NULL;
 
-    /* Only memset if memory came from our cached pools (Slabs/Spans). 
-     * Direct Mmap > 1MB is already guaranteed zeroed by the OS kernel. */
     if (LZ_LIKELY(total_size <= 1048576)) {
         memset(ptr, 0, total_size);
     }
@@ -292,19 +292,16 @@ static inline int is_power_of_two(size_t x) {
 void* lz_memalign(size_t alignment, size_t size) {
     if (LZ_UNLIKELY(alignment == 0 || !is_power_of_two(alignment))) return NULL;
 
-    /* PATH 1: Slabs (Natively cache-line aligned up to 64 bytes) */
     if (alignment <= 64 && size <= LZ_MAX_SLAB_OBJ_SIZE) {
         size_t promoted_size = LZ_ALIGN_UP(size, alignment);
         return lz_malloc(promoted_size);
     }
 
-    /* PATH 2: Spans (Natively OS Page aligned to 4096 bytes) */
     if (alignment <= LZ_PAGE_SIZE && size <= 1048576) {
         ensure_tls_init();
         return lz_span_alloc(tls_tlh_ptr, size);
     }
 
-    /* PATH 3: Direct mmap for extreme alignment or massive sizes */
     size_t base_offset = 128; 
     size_t dynamic_offset = LZ_ALIGN_UP(base_offset, alignment);
     
@@ -318,6 +315,9 @@ void* lz_memalign(size_t alignment, size_t size) {
     header->magic = LZ_CHUNK_MAGIC_V2;
     header->owning_tlh = NULL; 
     header->chunk_type = LZ_CHUNK_TYPE_DIRECT;
+    header->node_id = 0;
+    header->canary = 0;
+    header->next = NULL;
     header->checksum = lz_calc_checksum(header);
     
     *((size_t*)((char*)ptr + LZ_CACHE_LINE_SIZE)) = total_bytes; 
@@ -365,10 +365,6 @@ void* lz_pvalloc(size_t size) {
     return lz_memalign((size_t)page_size, rounded_size);
 }
 
-/* ========================================================================= *
- * POSIX API Extension (Metadata Reflection)
- * ========================================================================= */
-
 size_t lz_malloc_usable_size(void* ptr) {
     if (LZ_UNLIKELY(!ptr)) return 0;
 
@@ -383,7 +379,6 @@ size_t lz_malloc_usable_size(void* ptr) {
     if (LZ_UNLIKELY(chunk->magic != LZ_CHUNK_MAGIC_V2)) return 0;
 
     if (chunk->chunk_type == LZ_CHUNK_TYPE_DIRECT) {
-        /* Read exact requested user size from Cache Line 2 */
         return *((size_t*)((char*)chunk + LZ_CACHE_LINE_SIZE + sizeof(size_t)));
     } 
     else if (chunk->chunk_type == LZ_CHUNK_TYPE_SLAB) {

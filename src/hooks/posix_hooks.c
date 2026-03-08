@@ -32,22 +32,39 @@ static inline int is_base_ptr(void* ptr) {
     return ((char*)ptr >= g_base_heap) && ((char*)ptr < g_base_heap + LZ_BASE_HEAP_SIZE);
 }
 
-static void* lz_base_malloc(size_t size) {
+/**
+ * @brief Strictly aligned base allocator to survive posix_memalign during dlsym load.
+ */
+static void* lz_base_malloc_aligned(size_t alignment, size_t size) {
+    if (alignment < LZ_ABI_ALIGNMENT) alignment = LZ_ABI_ALIGNMENT;
     if (size == 0) size = LZ_ABI_ALIGNMENT;
 
-    size_t total_size = LZ_ALIGN_UP(size + sizeof(lz_base_header_t), LZ_ABI_ALIGNMENT);
-    size_t old_offset = atomic_fetch_add_explicit(&g_base_offset, total_size, memory_order_relaxed);
+    size_t current_offset = atomic_load_explicit(&g_base_offset, memory_order_relaxed);
+    size_t aligned_offset, total_size;
     
-    if (LZ_UNLIKELY(old_offset + total_size > LZ_BASE_HEAP_SIZE)) {
+    do {
+        uintptr_t base_addr = (uintptr_t)g_base_heap + current_offset;
+        uintptr_t payload_addr = LZ_ALIGN_UP(base_addr + sizeof(lz_base_header_t), alignment);
+        aligned_offset = payload_addr - sizeof(lz_base_header_t) - (uintptr_t)g_base_heap;
+        total_size = LZ_ALIGN_UP(size, LZ_ABI_ALIGNMENT);
+    } while (!atomic_compare_exchange_weak_explicit(&g_base_offset, &current_offset, 
+                                                    aligned_offset + sizeof(lz_base_header_t) + total_size, 
+                                                    memory_order_relaxed, memory_order_relaxed));
+
+    if (LZ_UNLIKELY(aligned_offset + sizeof(lz_base_header_t) + total_size > LZ_BASE_HEAP_SIZE)) {
         char msg[] = "\n[LZMALLOC FATAL] 4MB Base Allocator exhausted during bootstrap.\n";
         #pragma GCC diagnostic ignored "-Wunused-result"
         write(2, msg, sizeof(msg) - 1);
         __builtin_trap(); 
     }
 
-    lz_base_header_t* header = (lz_base_header_t*)(g_base_heap + old_offset);
+    lz_base_header_t* header = (lz_base_header_t*)(g_base_heap + aligned_offset);
     header->exact_size = size;
-    return (void*)(header + 1); 
+    return (void*)(header + 1);
+}
+
+static void* lz_base_malloc(size_t size) {
+    return lz_base_malloc_aligned(LZ_ABI_ALIGNMENT, size);
 }
 
 /* ========================================================================= *
@@ -95,7 +112,9 @@ LZ_PUBLIC void free(void* ptr) {
 }
 
 LZ_PUBLIC void* calloc(size_t num, size_t size) {
-    size_t total = num * size;
+    size_t total;
+    if (LZ_UNLIKELY(__builtin_mul_overflow(num, size, &total))) return NULL;
+    
     if (LZ_LIKELY(atomic_load_explicit(&g_lz_ready, memory_order_relaxed) == 1)) {
         return lz_calloc(num, size);
     }
@@ -129,7 +148,7 @@ LZ_PUBLIC int posix_memalign(void **memptr, size_t alignment, size_t size) {
     if (LZ_LIKELY(atomic_load_explicit(&g_lz_ready, memory_order_relaxed) == 1)) {
         return lz_posix_memalign(memptr, alignment, size);
     }
-    *memptr = lz_base_malloc(size);
+    *memptr = lz_base_malloc_aligned(alignment, size);
     return 0;
 }
 
@@ -137,21 +156,23 @@ LZ_PUBLIC void* memalign(size_t alignment, size_t size) {
     if (LZ_LIKELY(atomic_load_explicit(&g_lz_ready, memory_order_relaxed) == 1)) {
         return lz_memalign(alignment, size);
     }
-    return lz_base_malloc(size);
+    return lz_base_malloc_aligned(alignment, size);
 }
 
 LZ_PUBLIC void* aligned_alloc(size_t alignment, size_t size) {
     if (LZ_LIKELY(atomic_load_explicit(&g_lz_ready, memory_order_relaxed) == 1)) {
         return lz_aligned_alloc(alignment, size);
     }
-    return lz_base_malloc(size);
+    return lz_base_malloc_aligned(alignment, size);
 }
 
 LZ_PUBLIC void* valloc(size_t size) {
     if (LZ_LIKELY(atomic_load_explicit(&g_lz_ready, memory_order_relaxed) == 1)) {
         return lz_valloc(size);
     }
-    return lz_base_malloc(size);
+    long page_size = sysconf(_SC_PAGESIZE);
+    if (LZ_UNLIKELY(page_size <= 0)) page_size = 4096;
+    return lz_base_malloc_aligned((size_t)page_size, size);
 }
 
 LZ_PUBLIC void* pvalloc(size_t size) {

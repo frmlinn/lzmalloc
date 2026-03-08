@@ -27,15 +27,8 @@ debug:
 	@echo "Done. Library generated at: $(BUILD_DIR_DEBUG)/liblzmalloc.so"
 
 test: debug
-	@echo "=== Configuring tests ==="
-	@echo ">>> 1. Unit Tests"
-	@LD_PRELOAD=./$(BUILD_DIR_DEBUG)/liblzmalloc.so ./$(BUILD_DIR_DEBUG)/unit_test
-	
-	@echo "\n>>> 2. Integration Tests"
-	@LD_PRELOAD=./$(BUILD_DIR_DEBUG)/liblzmalloc.so ./$(BUILD_DIR_DEBUG)/integration_test
-	
-	@echo "\n>>> 3. Stress Tests"
-	@LD_PRELOAD=./$(BUILD_DIR_DEBUG)/liblzmalloc.so ./$(BUILD_DIR_DEBUG)/stress_test
+	@echo "=== Running Tests Suite via CTest ==="
+	@cd $(BUILD_DIR_DEBUG) && ctest --output-on-failure -V
 
 clean:
 	@echo "=== Cleaning build environment ==="

@@ -80,7 +80,6 @@ typedef struct LZ_CACHE_ALIGNED lz_tlh_s {
     uint32_t is_zombie;               
     uint32_t local_bytes_alloc_batch; 
     uint32_t local_bytes_free_batch;  
-    /* Total packed block: exactly 16 bytes. No implicit compiler padding needed. */
 
     /* --- 64-bit Variables and Pointers --- */
     size_t bytes_allocated;         
@@ -92,38 +91,10 @@ typedef struct LZ_CACHE_ALIGNED lz_tlh_s {
  * TLH Public API
  * ========================================================================= */
 
-/**
- * @brief Initializes a newly provisioned Thread-Local Heap.
- * @param tlh Pointer to the TLH memory region.
- * @param tid Monotonically increasing Thread ID assigned by the global router.
- */
 void lz_tlh_init(lz_tlh_t* tlh, uint32_t tid);
-
-/**
- * @brief Primary allocation router within the thread boundary.
- * @param tlh The calling thread's TLH.
- * @param size Requested allocation size in bytes.
- * @return Pointer to usable memory, or NULL on unrecoverable exhaustion.
- */
 void* lz_tlh_alloc(lz_tlh_t* tlh, size_t size);
-
-/**
- * @brief Universal free router. Handles both local and remote cross-thread frees.
- * @param tlh The executing thread's TLH (Not necessarily the memory owner).
- * @param ptr Pointer to the memory block being released.
- */
 void lz_tlh_free(lz_tlh_t* tlh, void* ptr);
-
-/**
- * @brief Flushes the pending remote free batch to the target thread using an atomic CAS.
- * @param tlh The executing thread's TLH.
- */
 void lz_tlh_flush_outgoing_batch(lz_tlh_t* tlh);
-
-/**
- * @brief Pulls pending remote frees from the atomic mailbox and processes them locally.
- * @param tlh The executing thread's TLH.
- */
 void lz_tlh_reap(lz_tlh_t* tlh);
 
 #endif /* LZ_TLH_H */

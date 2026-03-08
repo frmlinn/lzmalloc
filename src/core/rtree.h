@@ -10,17 +10,15 @@
 #include "chunk.h"
 
 /* ========================================================================= *
- * Bit Configuration (Targeting 48-bit to 52-bit Virtual Addresses)
+ * Bit Configuration (Targeting 48-bit Virtual Addresses)
  * ========================================================================= */
 
-/** @def LZ_RTREE_L2_BITS 
- * @brief Bits allocated for Level 2 (Leaves): 14 bits yielding 16384 entries. */
+/** @brief Bits allocated for Level 2 (Leaves): 14 bits yielding 16384 entries. */
 #define LZ_RTREE_L2_BITS 14
 #define LZ_RTREE_L2_ENTRIES (1 << LZ_RTREE_L2_BITS)
 #define LZ_RTREE_L2_MASK (LZ_RTREE_L2_ENTRIES - 1)
 
-/** @def LZ_RTREE_L1_BITS 
- * @brief Bits allocated for Level 1 (Root): 13 bits yielding 8192 entries. */
+/** @brief Bits allocated for Level 1 (Root): 13 bits yielding 8192 entries. */
 #define LZ_RTREE_L1_BITS 13
 #define LZ_RTREE_L1_ENTRIES (1 << LZ_RTREE_L1_BITS)
 #define LZ_RTREE_L1_MASK (LZ_RTREE_L1_ENTRIES - 1)
@@ -52,22 +50,13 @@ extern lz_rtree_root_t g_rtree_root;
  * Radix Tree Public API
  * ========================================================================= */
 
-/**
- * @brief Bootstraps the global Radix Tree root node.
- */
 void lz_rtree_init(void);
-
-/**
- * @brief Thread-safe, lock-free registration of a Chunk into the global tree.
- * @param chunk_addr The base virtual address of the Chunk.
- * @param metadata Pointer to the corresponding chunk header.
- */
 void lz_rtree_set(uintptr_t chunk_addr, lz_chunk_header_t* metadata);
 
 /**
  * @brief Resolves the owning Chunk metadata for any arbitrary pointer in O(1).
  * @note Critical hot-path function. Forced inline.
- * * @param ptr Any address within the allocator's space (e.g., from user's free()).
+ * * @param ptr Any address within the allocator's space.
  * @return Pointer to the Chunk header, or NULL if unmapped.
  */
 static LZ_ALWAYS_INLINE lz_chunk_header_t* lz_rtree_get(const void* ptr) {
@@ -85,10 +74,6 @@ static LZ_ALWAYS_INLINE lz_chunk_header_t* lz_rtree_get(const void* ptr) {
     return atomic_load_explicit(&leaf->entries[l2_idx], memory_order_relaxed);
 }
 
-/**
- * @brief Safely removes a mapping from the tree.
- * @param chunk_addr The base virtual address of the Chunk.
- */
 void lz_rtree_clear(uintptr_t chunk_addr);
 
 #endif /* LZ_RTREE_H */

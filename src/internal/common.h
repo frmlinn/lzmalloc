@@ -1,7 +1,7 @@
 /**
  * @file common.h
- * @brief Hardware primitives, bitwise math, and compiler abstractions for lzmalloc V2.
- * * @note This file represents Layer 0. It strictly defines macros and built-ins.
+ * @brief Hardware primitives, bitwise math, and compiler abstractions.
+ * * @note This file represents Layer 0/1. It strictly defines macros and built-ins.
  * It must not contain state, business logic, or external dependencies.
  */
 
@@ -17,10 +17,6 @@
 #include <assert.h>    
 #include <stdatomic.h> 
 #include "lz_log.h"    
-
-/* ========================================================================= *
- * Architecture Constants
- * ========================================================================= */
 #include "lz_config.h"
 
 /* ========================================================================= *
@@ -29,15 +25,13 @@
 
 /**
  * @def LZ_LIKELY(x)
- * @brief Static branch prediction (Likely).
- * Optimizes the CPU instruction pipeline by placing the block in the sequential flow.
+ * @brief Static branch prediction (Likely). Optimizes the CPU instruction pipeline.
  */
 #define LZ_LIKELY(x)   __builtin_expect(!!(x), 1)
 
 /**
  * @def LZ_UNLIKELY(x)
- * @brief Static branch prediction (Unlikely).
- * Moves error-handling or edge-case code away from the hot-path assembly.
+ * @brief Static branch prediction (Unlikely). Moves edge-case code off the hot-path.
  */
 #define LZ_UNLIKELY(x) __builtin_expect(!!(x), 0)
 
@@ -82,7 +76,7 @@
 
 /**
  * @brief Emits a CPU pause instruction for active wait loops (Spinlocks).
- * Prevents excessive power consumption and CPU pipeline contention during atomic waits.
+ * Prevents excessive power consumption and CPU pipeline contention.
  */
 static LZ_ALWAYS_INLINE void lz_cpu_relax(void) {
 #if defined(__x86_64__) || defined(__i386__)

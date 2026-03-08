@@ -1,17 +1,66 @@
-services:
-  # Entorno interactivo para debugging manual
-  interactive:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    stdin_open: true 
-    tty: true        
-    entrypoint: ["/bin/bash"] 
+# ==============================================================================
+# @file docker-compose.yml
+# @brief Orchestration matrix for debugging, unit testing, and stress testing.
+# @details Defines isolated service profiles to validate lzmalloc behavior 
+# under severe memory pressure, massive concurrency, and POSIX compliance checks.
+# ==============================================================================
 
-  # Ejecutor de la suite de pruebas core
-  c-tests:
+services:
+  # ----------------------------------------------------------------------------
+  # @service dev-sandbox
+  # @brief Interactive debugging environment with low-level kernel capabilities.
+  # @note Grants SYS_PTRACE for GDB hooking and disables seccomp for deep profiling.
+  # ----------------------------------------------------------------------------
+  dev-sandbox:
     build:
       context: .
       dockerfile: Dockerfile
       target: builder
+    container_name: lzmalloc-sandbox
+    stdin_open: true 
+    tty: true        
+    cap_add:
+      - SYS_PTRACE    # Required for GDB and strace
+      - IPC_LOCK      # Required for mmap mlock and huge pages testing
+    security_opt:
+      - seccomp:unconfined
+    volumes:
+      - .:/lzmalloc_src:rw  # Mount local code for live editing and recompilation
+    entrypoint: ["/bin/bash"] 
+
+  # ----------------------------------------------------------------------------
+  # @service ci-test-suite
+  # @brief Automated execution of the CTest suite (Unit, Integration, Stress).
+  # ----------------------------------------------------------------------------
+  ci-test-suite:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: builder
+    container_name: lzmalloc-test-runner
+    # Executes the CMake integrated test suite
     entrypoint: ["make", "test", "CC=clang"]
+
+  # ----------------------------------------------------------------------------
+  # @service chaos-stress
+  # @brief Aggressive concurrency and resource exhaustion simulation.
+  # @details Artificially restricts file descriptors and memory to validate 
+  # lzmalloc's graceful fallback to the 4MB Base Allocator and VMM safety.
+  # ----------------------------------------------------------------------------
+  chaos-stress:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: builder
+    container_name: lzmalloc-chaos
+    environment:
+      - LZMALLOC_TELEMETRY=1
+    ulimits:
+      nofile:
+        soft: 128     # Force FD exhaustion to trigger /dev/urandom fallbacks
+        hard: 256
+      memlock:
+        soft: -1      # Allow unlimited locked memory for extreme VMM testing
+        hard: -1
+    # Directly invokes the stress binary with preloaded library
+    entrypoint: ["sh", "-c", "LD_PRELOAD=./build/debug/liblzmalloc.so ./build/debug/stress_test"]

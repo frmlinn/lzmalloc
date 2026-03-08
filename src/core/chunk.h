@@ -20,8 +20,7 @@ struct lz_tlh_s;
  * Security Constants
  * ========================================================================= */
 
-/** @def LZ_CHUNK_MAGIC_V2
- * @brief "LZMALLOC" represented in Little Endian Hexadecimal ASCII. */
+/** @brief "LZMALLOC" represented in Little Endian Hexadecimal ASCII. */
 #define LZ_CHUNK_MAGIC_V2 0x434F4C4C414D5A4CULL 
 
 /* ========================================================================= *

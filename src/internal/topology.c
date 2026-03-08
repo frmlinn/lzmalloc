@@ -7,8 +7,7 @@
 #include "topology.h"
 
 #ifdef __linux__
-#include <unistd.h>
-#include <sys/syscall.h>
+#include <sched.h> /* Required for vDSO getcpu() */
 #endif
 
 /* ========================================================================= *
@@ -42,11 +41,11 @@ uint32_t lz_get_current_node(void) {
 #ifdef __linux__
     unsigned cpu, node;
     
-    /* * Leveraging SYS_getcpu via vDSO acts as a fast user-space memory read.
-     * This dynamic check ensures memory locality even if the OS scheduler 
-     * migrates the thread across physical CPU sockets abruptly.
+    /* * Routing through glibc's getcpu() utilizes the vDSO memory page 
+     * mapped in user-space, avoiding a context switch to ring-0. 
+     * Extremely fast (few nanoseconds) and prevents NUMA migration penalties.
      */
-    if (LZ_LIKELY(syscall(SYS_getcpu, &cpu, &node, NULL) == 0)) {
+    if (LZ_LIKELY(getcpu(&cpu, &node) == 0)) {
         if (LZ_LIKELY(node < LZ_MAX_NUMA_NODES)) {
             return node;
         }
