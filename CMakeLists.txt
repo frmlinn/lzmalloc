@@ -141,3 +141,10 @@ endmacro()
 add_lz_test(unit_test tests/unit_tests.c)
 add_lz_test(integration_test tests/integration_tests.c)
 add_lz_test(stress_test tests/stress_tests.c)
+
+# ------------------------------------------------------------------------------
+# @section Benchmarking Suite
+# ------------------------------------------------------------------------------
+add_executable(bench_suite benchmarks/bench_suite.c)
+target_include_directories(bench_suite PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(bench_suite PRIVATE pthread dl)

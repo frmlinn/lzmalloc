@@ -16,7 +16,7 @@ LABEL description="Compilation stage for lzmalloc 0.1.0"
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Install core system dependencies and strict Clang toolchain
+# Install core system dependencies, strict Clang toolchain, and competitor allocators
 RUN apt-get update && apt-get install -y --no-install-recommends \
     clang \
     lld \
@@ -28,6 +28,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     binutils \
     valgrind \
     gdb \
+    libjemalloc-dev \
+    libmimalloc-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /lzmalloc_src
@@ -37,6 +39,7 @@ COPY external/ external/
 COPY include/ include/
 COPY src/ src/
 COPY tests/ tests/
+COPY benchmarks/ benchmarks/
 COPY CMakeLists.txt Makefile lz_config.h.in ./
 
 # Execute the deterministic release build

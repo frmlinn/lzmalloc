@@ -6,7 +6,7 @@ CC ?= clang
 BUILD_DIR_RELEASE = build/release
 BUILD_DIR_DEBUG = build/debug
 
-.PHONY: all release debug test clean
+.PHONY: all release debug test bench clean
 
 all: release
 
@@ -29,6 +29,13 @@ debug:
 test: debug
 	@echo "=== Running Tests Suite via CTest ==="
 	@cd $(BUILD_DIR_DEBUG) && ctest --output-on-failure -V
+
+bench: release
+	@echo "=== Running Benchmarks (Local Mode) ==="
+	@echo "\n[1/2] Baseline (glibc ptmalloc)"
+	@$(BUILD_DIR_RELEASE)/bench_suite
+	@echo "\n[2/2] lzmalloc V2"
+	@LD_PRELOAD=$(PWD)/$(BUILD_DIR_RELEASE)/liblzmalloc.so $(BUILD_DIR_RELEASE)/bench_suite
 
 clean:
 	@echo "=== Cleaning build environment ==="

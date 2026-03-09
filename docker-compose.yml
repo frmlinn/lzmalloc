@@ -64,3 +64,32 @@ services:
         hard: -1
     # Directly invokes the stress binary with preloaded library
     entrypoint: ["sh", "-c", "LD_PRELOAD=./build/debug/liblzmalloc.so ./build/debug/stress_test"]
+
+  # ----------------------------------------------------------------------------
+  # @service benchmark-suite
+  # @brief Automated execution of the industrial benchmarking suite.
+  # @details Runs the benchmark natively (glibc), then sequentially injects 
+  # jemalloc, mimalloc, and lzmalloc via LD_PRELOAD to ensure a fair O.S. state.
+  # ----------------------------------------------------------------------------
+  benchmark-suite:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: builder
+    container_name: lzmalloc-benchmark
+    cap_add:
+      - IPC_LOCK      # To allow hardware-level page locking if needed
+    entrypoint: >
+      /bin/bash -c "
+      echo '=====================================' &&
+      echo '  ALLOCATOR BATTLE ROYALE (DOCKER)   ' &&
+      echo '=====================================' &&
+      echo -e '\n>>> 1. Baseline (glibc ptmalloc) <<<' &&
+      ./build/release/bench_suite &&
+      echo -e '\n>>> 2. jemalloc <<<' &&
+      LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2 ./build/release/bench_suite &&
+      echo -e '\n>>> 3. mimalloc <<<' &&
+      LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libmimalloc.so.2 ./build/release/bench_suite &&
+      echo -e '\n>>> 4. lzmalloc V2 <<<' &&
+      LD_PRELOAD=./build/release/liblzmalloc.so ./build/release/bench_suite
+      "

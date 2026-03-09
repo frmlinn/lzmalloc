@@ -26,7 +26,7 @@ permissions:
   contents: read
 
 jobs:
-  validate-logic:
+  ci-test-suite:
     name: Ubuntu LTS (Debug Test Suite)
     runs-on: ubuntu-latest
     timeout-minutes: 5 # Even tighter timeout for a leaner workflow
