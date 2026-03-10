@@ -38,4 +38,12 @@ lz_chunk_header_t* lz_vmm_alloc_chunk(void);
  */
 void lz_vmm_free_chunk(lz_chunk_header_t* chunk);
 
+/**
+ * @brief Actively deflates the RSS by purging all NUMA-local caches.
+ * @details Extracts all idle Chunks across all nodes, explicitly calls 
+ * madvise(MADV_DONTNEED) to release physical backing pages to the OS, 
+ * and relocates the metadata to the global slow-path pool.
+ */
+void lz_vmm_purge_all_caches(void);
+
 #endif /* LZ_VMM_H */

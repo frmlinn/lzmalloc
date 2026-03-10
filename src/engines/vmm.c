@@ -204,3 +204,42 @@ void lz_vmm_free_chunk(lz_chunk_header_t* chunk) {
         global_pool_unlock();
     }
 }
+
+/* ========================================================================= *
+ * Active RSS Deflation (Garbage Collection)
+ * ========================================================================= */
+
+void lz_vmm_purge_all_caches(void) {
+    for (uint32_t i = 0; i < LZ_MAX_NUMA_NODES; ++i) {
+        lz_numa_pool_t* pool = lz_topology_get_pool(i);
+        
+        /* 1. Lock and drain the entire NUMA cache */
+        pool_lock(i);
+        lz_chunk_header_t* chunk = atomic_exchange_explicit(&pool->free_chunks, NULL, memory_order_relaxed);
+        atomic_store_explicit(&pool->available_count, 0, memory_order_relaxed);
+        pool_unlock(i);
+
+        /* 2. Deflate physical memory and route to the Global Pool */
+        while (chunk) {
+            lz_chunk_header_t* next = chunk->next;
+            
+            /* Safe boundary calculation to preserve the 64-byte metadata header */
+            void* payload_start = (char*)chunk + LZ_PAGE_SIZE;
+            size_t payload_size = LZ_HUGE_PAGE_SIZE - LZ_PAGE_SIZE;
+
+#if defined(__linux__)
+            madvise(payload_start, payload_size, MADV_DONTNEED);
+#elif defined(__APPLE__) || defined(__FreeBSD__)
+            madvise(payload_start, payload_size, MADV_FREE);
+#endif
+
+            /* Push the deflated chunk into the global pool */
+            global_pool_lock();
+            chunk->next = g_global_free_chunks;
+            g_global_free_chunks = chunk;
+            global_pool_unlock();
+
+            chunk = next;
+        }
+    }
+}

@@ -83,7 +83,15 @@ static lz_tlh_t* lz_resurrect_zombie(void) {
 
 __attribute__((visibility("default")))
 void lzmalloc_gc(void) {
-    while (atomic_flag_test_and_set_explicit(&g_zombie_lock, memory_order_acquire)) lz_cpu_relax();
+    /* 1. Reap the currently executing thread's pending batches */
+    if (LZ_LIKELY(tls_tlh_ptr != NULL)) {
+        lz_tlh_reap(tls_tlh_ptr);
+    }
+
+    /* 2. Reap all Zombie threads (Thread adoption/cleanup) */
+    while (atomic_flag_test_and_set_explicit(&g_zombie_lock, memory_order_acquire)) {
+        lz_cpu_relax();
+    }
     lz_tlh_t* current = g_zombie_tlhs;
     atomic_flag_clear_explicit(&g_zombie_lock, memory_order_release);
 
@@ -91,6 +99,9 @@ void lzmalloc_gc(void) {
         lz_tlh_reap(current); 
         current = current->next_zombie;
     }
+
+    /* 3. Execute Global VMM Deflation (Return physical RAM to the OS) */
+    lz_vmm_purge_all_caches();
 }
 
 /* ========================================================================= *
