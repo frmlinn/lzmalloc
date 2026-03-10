@@ -5,7 +5,7 @@
 # without the overhead of production release packaging.
 # ==============================================================================
 
-name: ci-tests
+name: lzmalloc validation
 
 on:
   push:
