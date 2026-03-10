@@ -6,7 +6,7 @@
 
 ## Technical Summary
 
-`lzmalloc` is a POSIX-compliant, NUMA-aware, lock-free memory allocator implemented in C11. It is engineered for mechanical sympathy, utilizing strict 64-byte cache-line alignment to eliminate cross-core false sharing. The allocator minimizes CPU pipeline stalls through vDSO topology routing and maximizes physical memory reclamation via an active Virtual Memory Manager (VMM) with cache hysteresis and `madvise` deflation.
+`lzmalloc` is a POSIX-compliant, NUMA-aware, lock-free memory allocator implemented in C11. It is engineered for mechanical sympathy, utilizing strict 64-byte cache-line alignment to eliminate cross-core false sharing. The allocator minimizes CPU pipeline stalls through vDSO topology routing and maximizes physical memory reclamation via an active Virtual Memory Manager (VMM) with cache hysteresis and `madvise` deflation. Still in development with a lot more coming.
 
 ---
 
