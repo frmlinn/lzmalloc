@@ -1,245 +1,93 @@
 /**
  * @file vmm.c
- * @brief Implementation of the Virtual Memory Manager and Global Extent Manager.
+ * @brief Implementación del Treiber Stack con ABA-Tagging en 64-bits.
  */
-
-#define _GNU_SOURCE
 #include "vmm.h"
-#include <sys/mman.h>
-#include <stdatomic.h>
-#include <unistd.h>
+#include "memory.h"
+#include "atomics.h"
+#include "lz_log.h"
 
-/* ========================================================================= *
- * Extent Configuration (VMA Fragmentation Shield)
- * ========================================================================= */
+#define ABA_PTR_MASK  0x0000FFFFFFFFFFFFULL
+#define ABA_TAG_SHIFT 48
+#define ABA_TAG_ADD   (1ULL << ABA_TAG_SHIFT)
 
-#define LZ_EXTENT_CHUNKS 32
-#define LZ_EXTENT_SIZE (LZ_HUGE_PAGE_SIZE * LZ_EXTENT_CHUNKS)
-
-/* ========================================================================= *
- * Internal State: Global Pool & Protected NUMA Locks
- * ========================================================================= */
-
-/**
- * @struct lz_pool_lock_t
- * @brief Padding wrapper to prevent catastrophic False Sharing of NUMA locks.
- */
-typedef struct LZ_CACHE_ALIGNED {
-    atomic_flag lock;
-} lz_pool_lock_t;
-
-/** @brief Spinlocks mathematically isolated across CPU caches. */
-static lz_pool_lock_t g_pool_locks[LZ_MAX_NUMA_NODES];
-
-/** @brief Spinlock protecting the slow-path Global Pool. */
-static atomic_flag g_global_pool_lock = ATOMIC_FLAG_INIT;
-
-/** @brief Global Chunk Pool (Slow-path buffer linked list). */
-static lz_chunk_header_t* g_global_free_chunks = NULL;
-
-/* ========================================================================= *
- * Spinlock Helpers
- * ========================================================================= */
-
-static LZ_ALWAYS_INLINE void pool_lock(uint32_t node_id) {
-    while (atomic_flag_test_and_set_explicit(&g_pool_locks[node_id].lock, memory_order_acquire)) {
-        lz_cpu_relax();
-    }
+static LZ_ALWAYS_INLINE lz_chunk_t* aba_unpack_ptr(uint64_t tagged) {
+    return (lz_chunk_t*)(tagged & ABA_PTR_MASK);
 }
 
-static LZ_ALWAYS_INLINE void pool_unlock(uint32_t node_id) {
-    atomic_flag_clear_explicit(&g_pool_locks[node_id].lock, memory_order_release);
+static LZ_ALWAYS_INLINE uint64_t aba_pack(lz_chunk_t* ptr, uint64_t old_tagged) {
+    uint64_t new_tag = (old_tagged + ABA_TAG_ADD) & ~ABA_PTR_MASK;
+    return new_tag | (uintptr_t)ptr;
 }
 
-static LZ_ALWAYS_INLINE void global_pool_lock(void) {
-    while (atomic_flag_test_and_set_explicit(&g_global_pool_lock, memory_order_acquire)) {
-        lz_cpu_relax();
-    }
-}
+typedef struct {
+    LZ_CACHELINE_ALIGNED uint64_t lf_stack_head;
+    LZ_CACHELINE_ALIGNED uint32_t cached_count; 
+} LZ_CACHELINE_ALIGNED vmm_pool_t;
 
-static LZ_ALWAYS_INLINE void global_pool_unlock(void) {
-    atomic_flag_clear_explicit(&g_global_pool_lock, memory_order_release);
-}
-
-/* ========================================================================= *
- * Extent Allocation (The VMA Saver)
- * ========================================================================= */
-
-static void sys_alloc_extent(void) {
-    size_t request_size = LZ_EXTENT_SIZE + LZ_HUGE_PAGE_SIZE;
-    
-    void* raw_ptr = mmap(NULL, request_size, PROT_READ | PROT_WRITE, 
-                         MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-                         
-    if (LZ_UNLIKELY(raw_ptr == MAP_FAILED)) {
-        return;
-    }
-
-    uintptr_t raw_addr = (uintptr_t)raw_ptr;
-    uintptr_t aligned_addr = raw_addr;
-
-    if (LZ_UNLIKELY((raw_addr & (LZ_HUGE_PAGE_SIZE - 1)) != 0)) {
-        aligned_addr = LZ_ALIGN_UP(raw_addr, LZ_HUGE_PAGE_SIZE);
-        size_t prefix_size = aligned_addr - raw_addr;
-        size_t suffix_size = request_size - prefix_size - LZ_EXTENT_SIZE;
-
-        if (prefix_size > 0) {
-            munmap((void*)raw_addr, prefix_size);
-        }
-        if (suffix_size > 0) {
-            munmap((void*)(aligned_addr + LZ_EXTENT_SIZE), suffix_size);
-        }
-    } else {
-        munmap((void*)(raw_addr + LZ_EXTENT_SIZE), LZ_HUGE_PAGE_SIZE);
-    }
-
-#ifdef MADV_HUGEPAGE
-    madvise((void*)aligned_addr, LZ_EXTENT_SIZE, MADV_HUGEPAGE);
-#endif
-
-    global_pool_lock();
-    for (size_t i = 0; i < LZ_EXTENT_CHUNKS; ++i) {
-        lz_chunk_header_t* chunk = (lz_chunk_header_t*)(aligned_addr + (i * LZ_HUGE_PAGE_SIZE));
-        chunk->next = g_global_free_chunks;
-        g_global_free_chunks = chunk;
-    }
-    global_pool_unlock();
-}
-
-/* ========================================================================= *
- * Public API Implementation
- * ========================================================================= */
+static vmm_pool_t g_vmm_pool;
 
 void lz_vmm_init(void) {
-    lz_topology_init();
-    for (int i = 0; i < LZ_MAX_NUMA_NODES; ++i) {
-        /* Standard C11 strictly dictates proper initialization for atomic flags */
-        atomic_flag_clear_explicit(&g_pool_locks[i].lock, memory_order_release);
-    }
-    atomic_flag_clear_explicit(&g_global_pool_lock, memory_order_release);
+    lz_atomic_store_release(&g_vmm_pool.lf_stack_head, 0);
+    lz_atomic_store_release(&g_vmm_pool.cached_count, 0);
+    LZ_INFO("VMM: Lock-free pool inicializado.");
 }
 
-lz_chunk_header_t* lz_vmm_alloc_chunk(void) {
-    uint32_t current_node = lz_get_current_node();
-    lz_numa_pool_t* pool = lz_topology_get_pool(current_node);
-    lz_chunk_header_t* chunk = NULL;
+lz_chunk_t* lz_vmm_alloc_chunk(uint32_t core_id) {
+    uint64_t current_head = lz_atomic_load_acquire(&g_vmm_pool.lf_stack_head);
+    lz_chunk_t* chunk;
 
-    pool_lock(current_node);
-    lz_chunk_header_t* top = atomic_load_explicit(&pool->free_chunks, memory_order_relaxed);
-    if (top) {
-        chunk = top;
-        atomic_store_explicit(&pool->free_chunks, chunk->next, memory_order_relaxed);
-        atomic_fetch_sub_explicit(&pool->available_count, 1, memory_order_relaxed);
-    }
-    pool_unlock(current_node);
+    /* Treiber Stack (Pop) */
+    do {
+        chunk = aba_unpack_ptr(current_head);
+        if (LZ_UNLIKELY(!chunk)) break;
+        
+        /* Mitigación de Data-Race en C11: Lectura atómica especulativa. 
+         * No hay SIGSEGV gracias a que nunca aplicamos munmap() a chunks cacheados. */
+        lz_chunk_t* next_chunk = (lz_chunk_t*)lz_atomic_load_acquire((uintptr_t*)&chunk->next);
+        uint64_t new_head = aba_pack(next_chunk, current_head);
 
-    if (LZ_LIKELY(chunk != NULL)) {
-        chunk->next = NULL;
-        return chunk;
-    }
-
-    global_pool_lock();
-    if (!g_global_free_chunks) {
-        global_pool_unlock();
-        sys_alloc_extent(); 
-        global_pool_lock();
-    }
-    
-    if (g_global_free_chunks) {
-        chunk = g_global_free_chunks;
-        g_global_free_chunks = chunk->next;
-    }
-    global_pool_unlock();
+        if (lz_atomic_cas_weak(&g_vmm_pool.lf_stack_head, &current_head, new_head)) {
+            lz_atomic_fetch_sub(&g_vmm_pool.cached_count, 1);
+            break;
+        }
+    } while (true);
 
     if (LZ_UNLIKELY(!chunk)) {
-        return NULL; 
+        chunk = (lz_chunk_t*)lz_os_alloc_aligned(LZ_HUGE_PAGE_SIZE, LZ_HUGE_PAGE_SIZE);
+        if (LZ_UNLIKELY(!chunk)) {
+            LZ_ERROR("VMM: OS OOM. Imposible adquirir Chunk de 2MB.");
+            return NULL;
+        }
     }
 
-    /* Strict Neutralization: Erase any historical entropy */
+    chunk->magic = LZ_CHUNK_MAGIC_V2;
+    chunk->core_id = core_id;
     chunk->next = NULL;
-    chunk->owning_tlh = NULL; 
-    chunk->node_id = current_node;
-    chunk->magic = LZ_CHUNK_MAGIC_V2; 
-    chunk->canary = 0;
-    chunk->checksum = 0;
-
+    
     return chunk;
 }
 
-void lz_vmm_free_chunk(lz_chunk_header_t* chunk) {
-    if (LZ_UNLIKELY(!chunk || chunk->magic != LZ_CHUNK_MAGIC_V2)) {
-        return; 
-    }
+void lz_vmm_free_chunk(lz_chunk_t* chunk) {
+    if (LZ_UNLIKELY(!chunk || chunk->magic != LZ_CHUNK_MAGIC_V2)) return;
 
-    uint32_t target_node = chunk->node_id;
-    lz_numa_pool_t* pool = lz_topology_get_pool(target_node);
-    bool return_to_global = false;
-
-    pool_lock(target_node);
-    size_t count = atomic_load_explicit(&pool->available_count, memory_order_relaxed);
-    if (count < LZ_VMM_MAX_CACHED_CHUNKS) {
-        lz_chunk_header_t* top = atomic_load_explicit(&pool->free_chunks, memory_order_relaxed);
-        chunk->next = top;
-        atomic_store_explicit(&pool->free_chunks, chunk, memory_order_relaxed);
-        atomic_fetch_add_explicit(&pool->available_count, 1, memory_order_relaxed);
-    } else {
-        return_to_global = true;
-    }
-    pool_unlock(target_node);
-
-    if (LZ_UNLIKELY(return_to_global)) {
-        /* SAFE PAGE TECHNIQUE: Physical page release skipping the metadata boundary */
-        void* payload_start = (char*)chunk + LZ_PAGE_SIZE;
+    /* RSS Deflation: Si excede el límite, devolvemos memoria física pero RETENEMOS 
+     * el mapeo virtual y la cabecera, de lo contrario la lectura especulativa en 
+     * el Pop lanzaría un SIGSEGV. */
+    if (lz_atomic_load_acquire(&g_vmm_pool.cached_count) > LZ_VMM_MAX_CACHED_CHUNKS) {
+        void* payload_start = (uint8_t*)chunk + LZ_PAGE_SIZE;
         size_t payload_size = LZ_HUGE_PAGE_SIZE - LZ_PAGE_SIZE;
-
-#if defined(__linux__)
-        madvise(payload_start, payload_size, MADV_DONTNEED);
-#elif defined(__APPLE__) || defined(__FreeBSD__)
-        madvise(payload_start, payload_size, MADV_FREE);
-#endif
-
-        global_pool_lock();
-        chunk->next = g_global_free_chunks;
-        g_global_free_chunks = chunk;
-        global_pool_unlock();
+        lz_os_purge_physical(payload_start, payload_size);
+        LZ_DEBUG("VMM: Límite excedido. %zu bytes de RSS físico devueltos al OS.", payload_size);
     }
-}
 
-/* ========================================================================= *
- * Active RSS Deflation (Garbage Collection)
- * ========================================================================= */
+    uint64_t current_head = lz_atomic_load_acquire(&g_vmm_pool.lf_stack_head);
+    uint64_t new_head;
+    do {
+        /* Grabamos especulativamente el next */
+        lz_atomic_store_release((uintptr_t*)&chunk->next, (uintptr_t)aba_unpack_ptr(current_head));
+        new_head = aba_pack(chunk, current_head);
+    } while (!lz_atomic_cas_weak(&g_vmm_pool.lf_stack_head, &current_head, new_head));
 
-void lz_vmm_purge_all_caches(void) {
-    for (uint32_t i = 0; i < LZ_MAX_NUMA_NODES; ++i) {
-        lz_numa_pool_t* pool = lz_topology_get_pool(i);
-        
-        /* 1. Lock and drain the entire NUMA cache */
-        pool_lock(i);
-        lz_chunk_header_t* chunk = atomic_exchange_explicit(&pool->free_chunks, NULL, memory_order_relaxed);
-        atomic_store_explicit(&pool->available_count, 0, memory_order_relaxed);
-        pool_unlock(i);
-
-        /* 2. Deflate physical memory and route to the Global Pool */
-        while (chunk) {
-            lz_chunk_header_t* next = chunk->next;
-            
-            /* Safe boundary calculation to preserve the 64-byte metadata header */
-            void* payload_start = (char*)chunk + LZ_PAGE_SIZE;
-            size_t payload_size = LZ_HUGE_PAGE_SIZE - LZ_PAGE_SIZE;
-
-#if defined(__linux__)
-            madvise(payload_start, payload_size, MADV_DONTNEED);
-#elif defined(__APPLE__) || defined(__FreeBSD__)
-            madvise(payload_start, payload_size, MADV_FREE);
-#endif
-
-            /* Push the deflated chunk into the global pool */
-            global_pool_lock();
-            chunk->next = g_global_free_chunks;
-            g_global_free_chunks = chunk;
-            global_pool_unlock();
-
-            chunk = next;
-        }
-    }
+    lz_atomic_fetch_add(&g_vmm_pool.cached_count, 1);
 }

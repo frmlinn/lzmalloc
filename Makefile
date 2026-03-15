@@ -1,43 +1,38 @@
-# =========================================================================
-# lzmalloc - Wrapper Makefile for CMake automation
-# =========================================================================
+# ==============================================================================
+# lzmalloc v0.2.0 - Makefile Orchestrator
+# ==============================================================================
 
-CC ?= clang
+# Directorios de compilación aislados
+CC := clang
 BUILD_DIR_RELEASE = build/release
-BUILD_DIR_DEBUG = build/debug
+BUILD_DIR_DEBUG   = build/debug
 
-.PHONY: all release debug test bench clean
+# Reglas falsas (no corresponden a archivos)
+.PHONY: all release debug clean install
 
+# Objetivo por defecto
 all: release
 
 release:
-	@echo "=== Configuring lzmalloc (RELEASE Mode) ==="
+	@echo "=== [lzmalloc] Ensamblando arquitectura de silicio (Release) ==="
 	@mkdir -p $(BUILD_DIR_RELEASE)
-	@cd $(BUILD_DIR_RELEASE) && cmake -DCMAKE_C_COMPILER=$(CC) -DCMAKE_BUILD_TYPE=Release ../..
-	@echo "=== Compiling lzmalloc ==="
-	@$(MAKE) --no-print-directory -C $(BUILD_DIR_RELEASE)
-	@echo "Done. Library generated at: $(BUILD_DIR_RELEASE)/liblzmalloc.so"
+	@cd $(BUILD_DIR_RELEASE) && cmake -DCMAKE_BUILD_TYPE=Release ../../
+	@$(MAKE) -C $(BUILD_DIR_RELEASE) -j$(shell nproc 2>/dev/null || sysctl -n hw.ncpu)
+	@echo "=== Compilación exitosa. Artefacto: $(BUILD_DIR_RELEASE)/liblzmalloc.so ==="
 
 debug:
-	@echo "=== Configuring lzmalloc (DEBUG Mode) ==="
+	@echo "=== [lzmalloc] Ensamblando arquitectura de silicio (Debug) ==="
 	@mkdir -p $(BUILD_DIR_DEBUG)
-	@cd $(BUILD_DIR_DEBUG) && cmake -DCMAKE_C_COMPILER=$(CC) -DCMAKE_BUILD_TYPE=Debug ../..
-	@echo "=== Compiling lzmalloc ==="
-	@$(MAKE) --no-print-directory -C $(BUILD_DIR_DEBUG)
-	@echo "Done. Library generated at: $(BUILD_DIR_DEBUG)/liblzmalloc.so"
-
-test: debug
-	@echo "=== Running Tests Suite via CTest ==="
-	@cd $(BUILD_DIR_DEBUG) && ctest --output-on-failure -V
-
-bench: release
-	@echo "=== Running Benchmarks (Local Mode) ==="
-	@echo "\n[1/2] Baseline (glibc ptmalloc)"
-	@$(BUILD_DIR_RELEASE)/bench_suite
-	@echo "\n[2/2] lzmalloc V2"
-	@LD_PRELOAD=$(PWD)/$(BUILD_DIR_RELEASE)/liblzmalloc.so $(BUILD_DIR_RELEASE)/bench_suite
+	@cd $(BUILD_DIR_DEBUG) && cmake -DCMAKE_BUILD_TYPE=Debug ../../
+	@$(MAKE) -C $(BUILD_DIR_DEBUG) -j$(shell nproc 2>/dev/null || sysctl -n hw.ncpu)
 
 clean:
-	@echo "=== Cleaning build environment ==="
+	@echo "=== Limpiando artefactos generados ==="
 	@rm -rf build
-	@echo "Directory 'build/' successfully removed."
+
+install: release
+	@echo "=== Instalando lzmalloc a nivel global del SO ==="
+	@cd $(BUILD_DIR_RELEASE) && sudo cmake --install .
+	@echo "Actualizando caché del enlazador dinámico (ldconfig)..."
+	@sudo ldconfig 2>/dev/null || true
+	@echo "=== Instalación completada ==="
