@@ -1,6 +1,10 @@
 /**
  * @file chunk.h
- * @brief Layout estricto de la cabecera del Superbloque (Chunk) de 2MB.
+ * @brief Superblock (Chunk) Header Layout.
+ * @details Defines the strict structural layout for the 2MB huge-page chunk metadata. 
+ * The header is designed with mechanical sympathy to fit exactly within a 
+ * single hardware cache line, separating "hot" and "cold" fields to minimize 
+ * cache misses.
  */
 #ifndef LZ_META_CHUNK_H
 #define LZ_META_CHUNK_H
@@ -9,59 +13,57 @@
 #include "compiler.h"
 #include "lz_config.h"
 
-/* -------------------------------------------------------------------------- *
- * Identidad y Tipología
- * -------------------------------------------------------------------------- */
-
-/* Magic Number: "LZMALLOC" en ASCII Hexadecimal (Little Endian) */
+/** @brief Little-endian ASCII for "LZMALLOC" used for structural validation. */
 #define LZ_CHUNK_MAGIC_V2 0x434F4C4C414D5A4CULL
 
-/* Enrutamiento de los motores de la Capa 3 */
-#define LZ_CHUNK_TYPE_SLAB   0
-#define LZ_CHUNK_TYPE_SPAN   1
-#define LZ_CHUNK_TYPE_DIRECT 2
-
-/* -------------------------------------------------------------------------- *
- * Geometría de Datos (Mechanical Sympathy)
- * -------------------------------------------------------------------------- */
+/** @brief Memory engine identifiers. */
+#define LZ_CHUNK_TYPE_SLAB   0 /**< Small object engine (<= 32KB). */
+#define LZ_CHUNK_TYPE_SPAN   1 /**< Medium object engine (<= 1MB). */
+#define LZ_CHUNK_TYPE_DIRECT 2 /**< Large object engine (> 1MB). */
 
 /**
  * @struct lz_chunk_header_s
- * @brief Metadata residente en el offset 0x0 de cada bloque hiper-alineado.
- * @note Obligatoriamente rellenado (padded) para coincidir exactamente con 
- * el tamaño de la línea de caché L1/L2 configurada (64 o 128 bytes).
+ * @brief 2MB Superblock Header.
+ * @details Resides at offset 0x0 of every hyper-aligned 2MB memory block.
+ * Occupies exactly one cache line (64 bytes) to ensure O(1) metadata access 
+ * without triggering additional DRAM fetches.
  */
 typedef struct lz_chunk_header_s {
-    /* --- HOT DATA: 16 Bytes (Offset 0x0) --- */
-    /* El Magic Number DEBE ser el primer campo. lz_meta_resolve() lo lee
-     * asumiendo que está en el inicio matemático del bloque. */
+    /* --- HOT DATA: Offset 0x0 (Frequently accessed during alloc/free) --- */
+    
+    /** @brief Magic identifier for integrity checks. */
     uint64_t magic;
     
-    /* Topología: Define a qué Core-Local Heap pertenece este bloque */
+    /** @brief Physical core ID that owns this chunk. Used for RSEQ affinity checks. */
     uint32_t core_id;
+    
+    /** @brief Engine type (Slab, Span, or Direct). */
     uint32_t chunk_type;
 
-    /* --- COLD DATA: 16 Bytes (Offset 0x10) --- */
-    /* Puntero intrusivo para el Treiber Stack lock-free del VMM global */
-    struct lz_chunk_header_s* next;
+    /* --- COLD DATA: Offset 0x10 (Accessed during slow-paths or VMM recycling) --- */
     
-    /* Canario criptográfico para detectar desbordamientos masivos (Buffer Overflows) */
+    /** @brief Relative index used for the Treiber Stack in Virtual Arena Mode. */
+    uint32_t next_id;
+    
+    /** @brief Padding to maintain 8-byte alignment for the security canary. */
+    uint32_t _reserved; 
+    
+    /** @brief Randomized security canary to detect metadata corruption. */
     uint64_t canary;
 
-    /* --- HARDWARE PADDING --- */
-    /* Saturamos el resto de la línea de caché para evitar que el payload del 
-     * usuario (u otro metadata) comparta esta línea y provoque False Sharing. */
+    /* --- HARDWARE PADDING: Cache Line Saturation --- */
+    
+    /** @brief Padding to ensure the struct size matches the L1 cache line exactly. */
     uint8_t _padding[LZ_CACHE_LINE_SIZE - 32];
 
 } LZ_CACHELINE_ALIGNED lz_chunk_t;
 
-/* -------------------------------------------------------------------------- *
- * Validación Estática (Compile-Time Assertions)
- * -------------------------------------------------------------------------- */
-
-/* Promesa inviolable al silicio: Si algún ingeniero añade un campo y rompe
- * las matemáticas de la línea de caché, la compilación fallará inmediatamente. */
+/**
+ * @brief Topological assertion.
+ * Ensures the metadata does not exceed or underflow a single cache line, 
+ * preventing false sharing or wasted cache capacity.
+ */
 _Static_assert(sizeof(lz_chunk_t) == LZ_CACHE_LINE_SIZE, 
-    "Violación topológica: lz_chunk_t no satura exactamente la línea de caché");
+    "Topological Violation: lz_chunk_t does not saturate the cache line exactly.");
 
 #endif /* LZ_META_CHUNK_H */

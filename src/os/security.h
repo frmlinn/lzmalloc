@@ -1,6 +1,8 @@
 /**
  * @file security.h
- * @brief Criptografía de Punteros (Safe Linking) e inicialización de entropía.
+ * @brief Pointer Cryptography and Entropy Initialization.
+ * @details Implements the "Safe Linking" mitigation to prevent free-list 
+ * poisoning and heap-based exploitation techniques.
  */
 #ifndef LZ_OS_SECURITY_H
 #define LZ_OS_SECURITY_H
@@ -9,32 +11,36 @@
 #include "compiler.h"
 
 /* -------------------------------------------------------------------------- *
- * Estado Global de Entropía
+ * Global Entropy State
  * -------------------------------------------------------------------------- */
+/** @brief Process-wide unique secret used as a masking seed for Safe Linking. */
 extern uintptr_t g_lz_global_secret;
 
 /* -------------------------------------------------------------------------- *
- * API de Seguridad
+ * Security API
  * -------------------------------------------------------------------------- */
 
 /**
- * @brief Bootstraps el CSPRNG del OS para obtener la semilla global.
- * @note Thread-safe. Garantiza inicialización única.
+ * @brief Bootstraps the OS CSPRNG to acquire the global secret.
+ * @details Thread-safe and idempotent. Ensures the secret is only set once 
+ * during process startup.
  */
 void lz_security_init(void);
 
 /**
- * @brief Ofusca/Desofusca un puntero utilizando Safe Linking y Entropía Global.
- * @param ptr El puntero objetivo (ej. el puntero `next` de un free-list).
- * @param storage_addr La dirección física donde reside el puntero.
- * @return Puntero ofuscado (XOR matemático).
+ * @brief Obfuscates or de-obfuscates a pointer using Safe Linking.
+ * @details Mixes the pointer value with a global secret and the storage 
+ * address (ASLR-derived) to make heap metadata non-deterministic.
+ * @param ptr Target pointer (e.g., the 'next' pointer in a free-list).
+ * @param storage_addr Memory address where the pointer is physically stored.
+ * @return The cryptographically masked pointer (via XOR).
  */
 static LZ_ALWAYS_INLINE void* lz_ptr_obfuscate(void* ptr, void* volatile* storage_addr) {
     uintptr_t p = (uintptr_t)ptr;
     uintptr_t s = (uintptr_t)storage_addr;
     
-    /* Mix de entropía: Puntero ^ Semilla Criptográfica ^ (ASLR shift) 
-     * El shift de 4 asume alineación de 16-bytes (los últimos 4 bits siempre son 0). */
+    /* Entropy Mix: Pointer ^ Global Secret ^ (Storage Address >> 4) 
+     * Shift of 4 bits assumes 16-byte alignment (LSB are always zero). */
     return (void*)(p ^ g_lz_global_secret ^ (s >> 4));
 }
 

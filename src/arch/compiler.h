@@ -1,6 +1,8 @@
 /**
  * @file compiler.h
- * @brief Directivas estrictas de optimización y layout de memoria.
+ * @brief Compiler-specific Optimization Directives.
+ * @details Defines macros for Branch Target Prediction, I-Cache optimization, 
+ * and memory layout alignment to ensure mechanical sympathy.
  */
 #ifndef LZ_COMPILER_H
 #define LZ_COMPILER_H
@@ -8,33 +10,35 @@
 #include "lz_config.h"
 
 /* -------------------------------------------------------------------------- *
- * Predicción de Ramas Especulativa (Branch Target Buffer)
+ * Branch Prediction (BTB Optimization)
  * -------------------------------------------------------------------------- */
+/** @brief Static hint: Condition is expected to be True. */
 #define LZ_LIKELY(x)   __builtin_expect(!!(x), 1)
+/** @brief Static hint: Condition is expected to be False. */
 #define LZ_UNLIKELY(x) __builtin_expect(!!(x), 0)
 
 /* -------------------------------------------------------------------------- *
- * Control del Inliner (I-Cache Optimization)
+ * Inlining & Code Locality
  * -------------------------------------------------------------------------- */
-/** @brief Fuerza la inserción del código para no romper el pipeline con llamadas. */
+/** @brief Force-inline a function to eliminate call overhead in hot paths. */
 #define LZ_ALWAYS_INLINE inline __attribute__((always_inline))
 
-/** @brief Mueve la función a una sección fría del binario (.text.unlikely). */
+/** @brief Mark a function as cold, moving it to the .text.unlikely section. */
 #define LZ_COLD_PATH __attribute__((cold, noinline))
 
 /* -------------------------------------------------------------------------- *
- * Topología y Padding Estructural
+ * Memory Layout & Alignment
  * -------------------------------------------------------------------------- */
-/** @brief Evita False Sharing separando variables en distintas líneas de caché L1/L2. */
+/** @brief Align a structure to a cache line boundary to prevent False Sharing. */
 #define LZ_CACHELINE_ALIGNED __attribute__((aligned(LZ_CACHE_LINE_SIZE)))
 
-/** @brief Elimina el padding automático del compilador (usado en metadata densa). */
+/** @brief Disable automatic padding in structures for dense metadata packing. */
 #define LZ_PACKED __attribute__((packed))
 
 /* -------------------------------------------------------------------------- *
- * Aliasing Estricto
+ * Strict Aliasing
  * -------------------------------------------------------------------------- */
-/** @brief Promesa matemática al compilador: Este puntero no se solapa con ningún otro. */
+/** @brief Indicates that a pointer does not alias with any other pointer. */
 #define LZ_RESTRICT __restrict__
 
 #endif /* LZ_COMPILER_H */

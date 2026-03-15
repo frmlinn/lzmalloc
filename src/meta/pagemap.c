@@ -1,31 +1,36 @@
 /**
  * @file pagemap.c
- * @brief Implementación del Flat Virtual Array para el Slow-Path.
+ * @brief Implementation of the 512GB Sparse Virtual Array.
+ * @details Utilizes the MAP_NORESERVE flag to allocate a massive virtual 
+ * range without committing physical RAM, relying on the kernel's demand 
+ * paging to manage metadata storage.
  */
 #define _GNU_SOURCE
 #include "pagemap.h"
 #include "lz_log.h"
-#include "atomics.h"
 #include <sys/mman.h>
 #include <stddef.h>
 #include <errno.h>
 
-/* Matemáticas del Espacio de Direcciones (48 bits):
- * Entradas = 2^48 / 2^21 = 134,217,728
- * Tamaño total = 134,217,728 * 8 bytes = 1,073,741,824 bytes (1 GB exacto)
+/**
+ * @brief Total virtual size of the pagemap.
+ * Calculation: 2^36 entries * 8 bytes/pointer = 512 GB.
  */
-#define PAGEMAP_ENTRIES (1ULL << (48 - LZ_CHUNK_SHIFT))
 #define PAGEMAP_SIZE (PAGEMAP_ENTRIES * sizeof(void*))
 
-/* Puntero atómico para inicialización Lock-Free */
-static _Atomic(lz_chunk_t**) g_pagemap = NULL;
+/** @internal Global atomic root for the pagemap. */
+_Atomic(lz_chunk_t**) g_pagemap = NULL;
 
 void lz_pagemap_init(void) {
+    /* Double-Checked Locking (DCL) optimized via atomics */
     lz_chunk_t** current_map = lz_atomic_load_acquire(&g_pagemap);
     if (LZ_LIKELY(current_map != NULL)) return;
 
-    /* MAP_NORESERVE es vital: Informa al kernel que esto es un mapeo disperso (sparse).
-     * Consumo físico inicial: 0 bytes. */
+    /**
+     * @details MAP_NORESERVE is critical: it prevents the OS from checking 
+     * available swap/RAM for the 512GB allocation, allowing us to reserve 
+     * the VA space solely for address translation.
+     */
     void* map = mmap(
         NULL, PAGEMAP_SIZE, 
         PROT_READ | PROT_WRITE, 
@@ -34,30 +39,25 @@ void lz_pagemap_init(void) {
     );
 
     if (LZ_UNLIKELY(map == MAP_FAILED)) {
-        LZ_FATAL("Pagemap: mmap() falló al solicitar %llu bytes para el Flat Array (Errno: %d).", 
-                 (unsigned long long)PAGEMAP_SIZE, errno);
-        return; /* Inalcanzable, LZ_FATAL lanza un trap */
+        LZ_FATAL("Pagemap: mmap() failed to reserve 512GB VA (Errno: %d).", errno);
+        return; 
     }
 
     lz_chunk_t** expected = NULL;
+    /* Atomic CAS to handle concurrent initialization during LD_PRELOAD bootstrap */
     if (lz_atomic_cas_strong(&g_pagemap, &expected, (lz_chunk_t**)map)) {
-        LZ_INFO("Pagemap: Flat Virtual Array inicializado (Reservados %llu MB virtuales).", 
+        LZ_INFO("Pagemap: Flat Virtual Array initialized (%llu MB VA reserved).", 
                 (unsigned long long)(PAGEMAP_SIZE / 1024 / 1024));
     } else {
-        /* Race condition resuelta: Otro hilo se adelantó. Limpiamos nuestro mapeo. */
-        LZ_DEBUG("Pagemap: Colisión de inicialización detectada. Liberando mmap redundante.");
+        /* lost race: free the redundant mapping */
         munmap(map, PAGEMAP_SIZE);
     }
 }
 
 LZ_COLD_PATH void lz_pagemap_set_slow(void* ptr, lz_chunk_t* meta) {
     lz_chunk_t** map = lz_atomic_load_acquire(&g_pagemap);
-    if (LZ_UNLIKELY(map == NULL)) {
-        LZ_WARN("Pagemap: Intento de escritura sin inicializar (Set).");
-        return;
-    }
+    if (LZ_UNLIKELY(map == NULL)) return;
     
-    /* Extraer el índice de 27 bits (Address >> 21) */
     uintptr_t idx = ((uintptr_t)ptr >> LZ_CHUNK_SHIFT) & (PAGEMAP_ENTRIES - 1);
     map[idx] = meta;
 }

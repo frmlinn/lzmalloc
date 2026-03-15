@@ -1,6 +1,8 @@
 /**
  * @file memory.c
- * @brief Implementación de las primitivas de mmap y madvise.
+ * @brief Implementation of VMA primitives via mmap and madvise.
+ * @details Manages kernel-level memory transactions. Focuses on forcing 
+ * alignment via address space over-allocation and trimming.
  */
 #define _GNU_SOURCE
 #include "memory.h"
@@ -11,33 +13,33 @@
 #include <errno.h>
 
 void* lz_os_alloc_aligned(size_t size, size_t alignment) {
-    /* Aserción matemática: El alignment DEBE ser una potencia de 2 para usar máscaras AND */
+    /* Mathematical assertion: Alignment MUST be a power of 2 for AND-masking */
     if (LZ_UNLIKELY(alignment == 0 || (alignment & (alignment - 1)) != 0)) {
-        LZ_FATAL("Memory: Se solicitó un alineamiento VMA que no es potencia de 2: %zu", alignment);
-        return NULL; /* Inalcanzable tras LZ_FATAL, pero calma al compilador */
+        LZ_FATAL("Memory: VMA alignment request is not a power of 2: %zu", alignment);
+        return NULL;
     }
 
-    /* 1. Sobreasignación para garantizar que la frontera caiga dentro del mapeo */
+    /* 1. Over-allocation: Ensure the boundary falls within the mapped range */
     size_t request_size = size + alignment;
     
     void* raw_ptr = mmap(NULL, request_size, PROT_READ | PROT_WRITE, 
                          MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
                          
     if (LZ_UNLIKELY(raw_ptr == MAP_FAILED)) {
-        LZ_ERROR("Memory: mmap() falló al solicitar %zu bytes (Errno: %d). OS OOM probable.", request_size, errno);
+        LZ_ERROR("Memory: mmap() failed for %zu bytes (Errno: %d). System OOM likely.", request_size, errno);
         return NULL;
     }
 
     uintptr_t raw_addr = (uintptr_t)raw_ptr;
     void* final_ptr = NULL;
     
-    /* 2. Fast-Path OS: A veces el OS ya nos devuelve un puntero perfectamente alineado */
+    /* 2. Fast-Path: Kernel returns a perfectly aligned pointer by chance */
     if (LZ_LIKELY((raw_addr & (alignment - 1)) == 0)) {
-        /* Recortamos el exceso del sufijo (Exactamente 'alignment' bytes extra) */
+        /* Unmap the excess suffix (Exactly 'alignment' bytes) */
         munmap((void*)(raw_addr + size), alignment);
         final_ptr = (void*)raw_addr;
     } 
-    /* 3. Slow-Path OS: Forzar alineamiento matemático y recortar extremos */
+    /* 3. Slow-Path: Manually force mathematical alignment and trim both ends */
     else {
         uintptr_t aligned_addr = (raw_addr + alignment - 1) & ~(alignment - 1);
         size_t prefix_size = aligned_addr - raw_addr;
@@ -53,9 +55,9 @@ void* lz_os_alloc_aligned(size_t size, size_t alignment) {
     }
 
 #if defined(__linux__) && defined(MADV_HUGEPAGE)
-    /* Solicitar Transparent Huge Pages si el kernel lo permite */
+    /* Advisory: Request Transparent Huge Pages (THP) to reduce TLB pressure */
     if (madvise(final_ptr, size, MADV_HUGEPAGE) != 0) {
-        LZ_DEBUG("Memory: MADV_HUGEPAGE no habilitado o ignorado para el bloque %p.", final_ptr);
+        LZ_DEBUG("Memory: MADV_HUGEPAGE ignored or disabled for block %p.", final_ptr);
     }
 #endif
 
@@ -66,7 +68,7 @@ void* lz_os_alloc_aligned(size_t size, size_t alignment) {
 void lz_os_free(void* ptr, size_t size) {
     if (LZ_LIKELY(ptr)) {
         if (LZ_UNLIKELY(munmap(ptr, size) != 0)) {
-            LZ_ERROR("Memory: munmap() falló en %p (Size: %zu). Fuga de memoria VMA inminente.", ptr, size);
+            LZ_ERROR("Memory: munmap() failure at %p (Size: %zu). VMA leak imminent.", ptr, size);
         } else {
             LZ_DEBUG("Memory: VMA Free -> %p (Size: %zu)", ptr, size);
         }
@@ -76,15 +78,15 @@ void lz_os_free(void* ptr, size_t size) {
 void lz_os_purge_physical(void* ptr, size_t size) {
     if (LZ_UNLIKELY(!ptr || size == 0)) return;
 
-    /* Absorción Topológica: Reducir el RSS del proceso */
+    /* Topological Absorption: Release physical backing pages */
 #if defined(__linux__)
-    /* MADV_DONTNEED en Linux libera sincrónicamente la memoria física */
+    /* MADV_DONTNEED: Synchronously drops pages and clears the resident bit */
     madvise(ptr, size, MADV_DONTNEED);
 #elif defined(__APPLE__) || defined(__FreeBSD__)
-    /* MADV_FREE es diferido (lazy) */
+    /* MADV_FREE: Lazy release; kernel reclaims pages only under pressure */
     madvise(ptr, size, MADV_FREE);
 #else
-    /* Fallback genérico POSIX */
+    /* POSIX Fallback */
     posix_madvise(ptr, size, POSIX_MADV_DONTNEED);
 #endif
 }
